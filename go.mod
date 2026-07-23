@@ -6,6 +6,8 @@ require (
 	github.com/ethereum/go-ethereum v1.16.8
 	github.com/go-resty/resty/v2 v2.11.0
 	github.com/google/uuid v1.6.0
+	github.com/tidwall/pretty v1.2.1
+	google.golang.org/protobuf v1.36.11
 )
 
 require (
@@ -15,5 +17,4 @@ require (
 	golang.org/x/crypto v0.36.0 // indirect
 	golang.org/x/net v0.38.0 // indirect
 	golang.org/x/sys v0.36.0 // indirect
-	google.golang.org/protobuf v1.36.11 // indirect
 )
