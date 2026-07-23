@@ -1,6 +1,7 @@
 package helpers
 
 import (
+	"fmt"
 	"strings"
 
 	"github.com/m1xar/scope360-reconstruction/pkg/okx/connector/okx/models"
@@ -14,7 +15,7 @@ func GroupOrdersByInst(orders []models.Order) map[string][]models.Order {
 	return idx
 }
 
-func MatchOrdersToPosition(cp models.ClosedPosition, ordersByInst map[string][]models.Order) []models.Order {
+func MatchOrdersToPosition(cp models.ClosedPosition, ordersByInst map[string][]models.Order, instrument models.Instrument) []models.Order {
 	instOrders := ordersByInst[cp.InstId]
 	if len(instOrders) == 0 {
 		return nil
@@ -26,6 +27,8 @@ func MatchOrdersToPosition(cp models.ClosedPosition, ordersByInst map[string][]m
 
 	matched := make([]models.Order, 0)
 	for _, ord := range instOrders {
+		size := MustFloat(ord.Sz) * MustFloat(instrument.CtVal)
+		ord.Sz = fmt.Sprint(size)
 		ordPosSide := strings.ToLower(ord.PosSide)
 		if ordPosSide != "" && ordPosSide != "net" && targetPosSide != "" && ordPosSide != targetPosSide {
 			continue

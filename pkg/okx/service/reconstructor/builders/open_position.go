@@ -9,7 +9,7 @@ import (
 	"github.com/m1xar/scope360-reconstruction/pkg/okx/service/reconstructor/helpers"
 )
 
-func BuildOpenPosition(pos models.OpenPosition) domain.OpenPosition {
+func BuildOpenPosition(pos models.OpenPosition, instrument models.Instrument) domain.OpenPosition {
 	positionID, err := uuid.NewV7()
 	if err != nil {
 		positionID = uuid.Nil
@@ -18,7 +18,7 @@ func BuildOpenPosition(pos models.OpenPosition) domain.OpenPosition {
 	return domain.OpenPosition{
 		ID:           positionID,
 		Pair:         helpers.NormalizePair(pos.InstId),
-		Amount:       helpers.Round8(math.Abs(helpers.MustFloat(pos.Pos))),
+		Amount:       helpers.Round8(math.Abs(helpers.MustFloat(pos.Pos)) * helpers.MustFloat(instrument.CtVal)),
 		Side:         helpers.SideFromPosSide(pos.PosSide, pos.Pos),
 		EntryPrice:   helpers.Round8(helpers.MustFloat(pos.AvgPx)),
 		CurrentPrice: helpers.Round8(helpers.MustFloat(pos.MarkPx)),

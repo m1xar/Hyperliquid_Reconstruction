@@ -67,12 +67,27 @@ func GetBuiltPositions(
 		replyCh chan helpers.CandleResponse
 	}
 
+	identifiers := map[string]models.Instrumentidentifier{}
+	for _, cp := range closedPositions {
+		_, ok := identifiers[cp.InstId]
+		if ok {
+			continue
+		}
+
+		identifiers[cp.InstId] = models.Instrumentidentifier{InstID: cp.InstId, InstType: cp.InstType}
+	}
+
+	instruments, err := executors.FetchInstruments(client, baseURL, identifiers)
+	if err != nil {
+		return nil, err
+	}
+
 	pending := make([]pendingCandle, 0, len(closedPositions))
 	positions := make([]domain.Position, len(closedPositions))
 
 	for i, cp := range closedPositions {
-		posOrders := helpers.MatchOrdersToPosition(cp, ordersByInst)
-		pos, err := helpers.BuildPosition(cp, posOrders)
+		posOrders := helpers.MatchOrdersToPosition(cp, ordersByInst, instruments[cp.InstId])
+		pos, err := helpers.BuildPosition(cp, posOrders, instruments[cp.InstId])
 		if err != nil {
 			continue
 		}
@@ -168,10 +183,26 @@ func GetOpenPositions(
 		return nil, err
 	}
 
+	identifiers := map[string]models.Instrumentidentifier{}
+	for _, cp := range raw {
+		_, ok := identifiers[cp.InstId]
+		if ok {
+			continue
+		}
+
+		identifiers[cp.InstId] = models.Instrumentidentifier{InstID: cp.InstId, InstType: cp.InstType}
+	}
+
+	instruments, err := executors.FetchInstruments(client, baseURL, identifiers)
+	if err != nil {
+		return nil, err
+	}
+
 	positions := make([]domain.OpenPosition, 0, len(raw))
 	for _, r := range raw {
-		positions = append(positions, builders.BuildOpenPosition(r))
+		positions = append(positions, builders.BuildOpenPosition(r, instruments[r.InstId]))
 	}
+
 	enrichOpenPositionOrders(client, baseURL, raw, positions)
 	return positions, nil
 }
