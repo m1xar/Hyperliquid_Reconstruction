@@ -11,6 +11,7 @@ import (
 func BuildPosition(
 	cp models.ClosedPosition,
 	orders []models.Order,
+	instrument models.Instrument,
 ) (domain.Position, error) {
 	posID, err := uuid.NewV7()
 	if err != nil {
@@ -19,7 +20,7 @@ func BuildPosition(
 
 	entry := MustFloat(cp.OpenAvgPx)
 	exit := MustFloat(cp.CloseAvgPx)
-	amount := MustFloat(cp.OpenMaxPos)
+	amount := MustFloat(cp.OpenMaxPos) * MustFloat(instrument.CtVal)
 	pnl := MustFloat(cp.Pnl)
 	funding := MustFloat(cp.FundingFee)
 	net := MustFloat(cp.RealizedPnl)
@@ -93,30 +94,30 @@ func BuildPosition(
 	}
 
 	return domain.Position{
-		ID:         posID,
-		Side:       side,
-		Pair:       NormalizePair(cp.InstId),
-		Amount:     Round8(amount),
-		EntryPrice: Round8(entry),
-		ExitPrice:  Round8(exit),
-		Pnl:        Round8(pnl),
-		NetPnl:     Round8(net),
-		Commission: Round8(fee),
-		Funding:    Round8(funding),
-		MAE:        nil,
-		MFE:        nil,
-		TP:         tp,
-		SL:         sl,
-		RR:         rr,
-		RRPlanned:  rrPlanned,
+		ID:               posID,
+		Side:             side,
+		Pair:             NormalizePair(cp.InstId),
+		Amount:           Round8(amount),
+		EntryPrice:       Round8(entry),
+		ExitPrice:        Round8(exit),
+		Pnl:              Round8(pnl),
+		NetPnl:           Round8(net),
+		Commission:       Round8(fee),
+		Funding:          Round8(funding),
+		MAE:              nil,
+		MFE:              nil,
+		TP:               tp,
+		SL:               sl,
+		RR:               rr,
+		RRPlanned:        rrPlanned,
 		LiquidationPrice: liqPrice,
 		Isolated:         cp.MgnMode == "isolated",
 		Closed:           true,
 		Status:           &status,
 		Multiplier:       uint32(lever),
-		CreatedAt:  start,
-		ClosedAt:   &end,
-		Orders:     domainOrders,
+		CreatedAt:        start,
+		ClosedAt:         &end,
+		Orders:           domainOrders,
 	}, nil
 }
 
