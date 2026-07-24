@@ -10,6 +10,7 @@ type OpenPosition struct {
 	ID           uuid.UUID
 	Pair         string
 	Amount       float64
+	Multiplier   uint32
 	Side         string
 	EntryPrice   float64
 	CurrentPrice float64
