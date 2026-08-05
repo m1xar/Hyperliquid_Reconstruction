@@ -1,6 +1,7 @@
 package executors
 
 import (
+	"fmt"
 	"sync"
 
 	"github.com/go-resty/resty/v2"
@@ -32,25 +33,37 @@ func FetchInstruments(client *resty.Client, baseURL string, identifiers map[stri
 	var (
 		wg          sync.WaitGroup
 		mu          sync.Mutex
-		err         error
+		firstErr    error
 		semaphore   = make(chan struct{}, 5)
-		instruments = make(map[string]models.Instrument)
+		instruments = make(map[string]models.Instrument, len(identifiers))
 	)
 
-	for i := range identifiers {
-		if err != nil {
-			break
+	setErr := func(err error) {
+		if err == nil {
+			return
 		}
+		mu.Lock()
+		if firstErr == nil {
+			firstErr = err
+		}
+		mu.Unlock()
+	}
 
+	for i := range identifiers {
 		wg.Add(1)
 		id := identifiers[i]
+		semaphore <- struct{}{}
 		go func() {
 			defer wg.Done()
-			semaphore <- struct{}{}
+			defer func() { <-semaphore }()
 
 			instrument, fetchErr := FetchInstrument(client, baseURL, id.InstID, id.InstType)
-			if err != nil {
-				err = fetchErr
+			if fetchErr != nil {
+				setErr(fetchErr)
+				return
+			}
+			if instrument == nil {
+				setErr(fmt.Errorf("okx: instrument %s returned nil", id.InstID))
 				return
 			}
 
@@ -58,13 +71,10 @@ func FetchInstruments(client *resty.Client, baseURL string, identifiers map[stri
 			instruments[id.InstID] = *instrument
 			mu.Unlock()
 		}()
-		<-semaphore
 	}
 	wg.Wait()
 
-	if err != nil {
-		return instruments, err
-	}
-
-	return instruments, nil
+	mu.Lock()
+	defer mu.Unlock()
+	return instruments, firstErr
 }
