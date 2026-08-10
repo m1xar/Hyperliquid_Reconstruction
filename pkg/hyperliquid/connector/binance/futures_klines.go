@@ -23,17 +23,24 @@ const (
 
 var klineGate = make(chan struct{}, maxInFlightKlines)
 
+// newFuturesKlineClient is intentionally separate from the Hyperliquid resty
+// client. Callers often pass an HL client with RetryCount>0 on 429; inheriting
+// that policy stampses fapi.binance.com. Pacing/backoff live in this package.
+func newFuturesKlineClient() *resty.Client {
+	return resty.New().
+		SetTimeout(20 * time.Second).
+		SetRetryCount(0)
+}
+
 func FetchFuturesKlinesPaged(
-	client *resty.Client,
+	_ *resty.Client,
 	symbol string,
 	interval string,
 	startTimeMs int64,
 	endTimeMs int64,
 	limit int,
 ) ([]hlmodels.HyperliquidCandle, error) {
-	if client == nil {
-		client = resty.New().SetTimeout(20 * time.Second)
-	}
+	client := newFuturesKlineClient()
 
 	if limit <= 0 {
 		limit = 499
