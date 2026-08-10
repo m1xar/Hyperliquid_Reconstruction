@@ -4,12 +4,24 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/go-resty/resty/v2"
 	hlmodels "github.com/m1xar/scope360-reconstruction/pkg/hyperliquid/connector/hyperliquid/models"
 )
 
-const futuresBaseURL = "https://fapi.binance.com"
+const (
+	futuresBaseURL = "https://fapi.binance.com"
+
+	// Public klines are weight-cheap, but HL reconstruction can stampede them.
+	// Serialize + pace across the whole process.
+	maxInFlightKlines = 1
+	pageGap           = 150 * time.Millisecond
+	rateLimitSleep    = 2 * time.Second
+	rateLimitRetries  = 4
+)
+
+var klineGate = make(chan struct{}, maxInFlightKlines)
 
 func FetchFuturesKlinesPaged(
 	client *resty.Client,
@@ -20,7 +32,7 @@ func FetchFuturesKlinesPaged(
 	limit int,
 ) ([]hlmodels.HyperliquidCandle, error) {
 	if client == nil {
-		client = resty.New()
+		client = resty.New().SetTimeout(20 * time.Second)
 	}
 
 	if limit <= 0 {
@@ -38,7 +50,7 @@ func FetchFuturesKlinesPaged(
 		}
 
 		var raw [][]any
-		err := fetchFuturesKlines(
+		err := fetchFuturesKlinesGated(
 			client,
 			symbol,
 			interval,
@@ -71,9 +83,37 @@ func FetchFuturesKlinesPaged(
 		}
 
 		nextStart = lastOpen + 1
+		time.Sleep(pageGap)
 	}
 
 	return out, nil
+}
+
+func fetchFuturesKlinesGated(
+	client *resty.Client,
+	symbol string,
+	interval string,
+	startTimeMs int64,
+	endTimeMs int64,
+	limit int,
+	out *[]([]any),
+) error {
+	var lastErr error
+	for attempt := 0; attempt <= rateLimitRetries; attempt++ {
+		klineGate <- struct{}{}
+		err := fetchFuturesKlines(client, symbol, interval, startTimeMs, endTimeMs, limit, out)
+		<-klineGate
+
+		if err == nil {
+			return nil
+		}
+		lastErr = err
+		if !isRateLimited(err) || attempt == rateLimitRetries {
+			return err
+		}
+		time.Sleep(rateLimitSleep * time.Duration(attempt+1))
+	}
+	return lastErr
 }
 
 func fetchFuturesKlines(
@@ -108,6 +148,14 @@ func fetchFuturesKlines(
 	}
 
 	return nil
+}
+
+func isRateLimited(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "too many requests") || strings.Contains(msg, "429")
 }
 
 func mapKlines(raw [][]any, symbol string, interval string) ([]hlmodels.HyperliquidCandle, int64, error) {

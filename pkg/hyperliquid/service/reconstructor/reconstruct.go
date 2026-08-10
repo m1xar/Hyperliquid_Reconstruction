@@ -8,12 +8,16 @@ import (
 	"github.com/m1xar/scope360-reconstruction/pkg/hyperliquid/service/reconstructor/helpers"
 )
 
+// ReconstructTrades groups fills into closed trades and fetches MAE/MFE candles.
+// When minCloseMs > 0, matches whose last fill is before that cutoff are skipped
+// entirely (they would be dropped by FilterPositionsByClosedAt anyway).
 func ReconstructTrades(
 	fills []models.RawFill,
 	fundings []models.FundingHistoryItem,
 	orderIdx helpers.OrderIndex,
 	candleRequests chan<- helpers.CandleRequest,
 	out chan<- envelope.TradeEnvelope,
+	minCloseMs int64,
 ) {
 	matches, _ := helpers.MatchFillGroups(fills)
 
@@ -27,6 +31,11 @@ func ReconstructTrades(
 	for _, match := range matches {
 		cp := match.Fills
 		if len(cp) == 0 {
+			continue
+		}
+
+		closeMs := cp[len(cp)-1].Time
+		if minCloseMs > 0 && closeMs < minCloseMs {
 			continue
 		}
 

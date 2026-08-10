@@ -4,16 +4,70 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/go-resty/resty/v2"
 )
 
-const defaultTimeout = 20 * time.Second
+const (
+	defaultTimeout      = 20 * time.Second
+	defaultRetryCount   = 3
+	defaultRetryWait    = 500 * time.Millisecond
+	defaultRetryMaxWait = 2 * time.Second
+)
+
+type HTTPError struct {
+	StatusCode int
+	Status     string
+	Body       string
+}
+
+func (e *HTTPError) Error() string {
+	if strings.TrimSpace(e.Body) == "" {
+		return fmt.Sprintf("hyperliquid: unexpected status %s", e.Status)
+	}
+	return fmt.Sprintf("hyperliquid: unexpected status %s: %s", e.Status, strings.TrimSpace(e.Body))
+}
+
+func (e *HTTPError) GetStatusCode() int {
+	if e == nil {
+		return 0
+	}
+	return e.StatusCode
+}
+
+// NewBaseClient returns a resty client with 429/5xx retries (same idea as OKX).
+func NewBaseClient() *resty.Client {
+	return ConfigureRetries(resty.New())
+}
+
+// ConfigureRetries attaches 429/5xx retry policy to an existing client.
+func ConfigureRetries(client *resty.Client) *resty.Client {
+	if client == nil {
+		client = resty.New()
+	}
+	client.
+		SetTimeout(defaultTimeout).
+		SetRetryCount(defaultRetryCount).
+		SetRetryWaitTime(defaultRetryWait).
+		SetRetryMaxWaitTime(defaultRetryMaxWait)
+	client.AddRetryCondition(func(resp *resty.Response, err error) bool {
+		if err != nil {
+			return true
+		}
+		if resp == nil {
+			return false
+		}
+		code := resp.StatusCode()
+		return code == http.StatusTooManyRequests || code >= http.StatusInternalServerError
+	})
+	return client
+}
 
 func DoRequest(client *resty.Client, endpoint string, payload any, out any) error {
 	if client == nil {
-		client = resty.New().SetTimeout(defaultTimeout)
+		client = NewBaseClient()
 	}
 
 	resp, err := client.R().
@@ -25,7 +79,11 @@ func DoRequest(client *resty.Client, endpoint string, payload any, out any) erro
 	}
 
 	if resp.StatusCode() < http.StatusOK || resp.StatusCode() >= http.StatusMultipleChoices {
-		return fmt.Errorf("hyperliquid: unexpected status %s", resp.Status())
+		return &HTTPError{
+			StatusCode: resp.StatusCode(),
+			Status:     resp.Status(),
+			Body:       string(resp.Body()),
+		}
 	}
 
 	if out == nil {

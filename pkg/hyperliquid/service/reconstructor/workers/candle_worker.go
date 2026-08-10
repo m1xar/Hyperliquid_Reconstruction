@@ -37,23 +37,58 @@ func fetchCandles(client *resty.Client, endpoint string, req helpers.CandleReque
 	intervalMs, _ := helpers.IntervalToMs(req.Interval)
 	oldestAllowedMs := time.Now().UnixMilli() - intervalMs*5000
 
-	if req.StartMs < oldestAllowedMs {
-		return binance.FetchFuturesKlinesPaged(
+	// Recent enough for Hyperliquid candle API — stay on HL.
+	if req.StartMs >= oldestAllowedMs {
+		return executors.FetchAllCandlesHyperliquid(
 			client,
+			endpoint,
 			req.Coin,
 			req.Interval,
 			req.StartMs,
 			req.EndMs,
-			499,
 		)
 	}
 
-	return executors.FetchAllCandlesHyperliquid(
-		client,
-		endpoint,
-		req.Coin,
-		req.Interval,
-		req.StartMs,
-		req.EndMs,
-	)
+	// Older than HL window: pull Binance for the old slice, HL for the recent slice.
+	var out []models.HyperliquidCandle
+
+	binanceEnd := req.EndMs
+	if binanceEnd > oldestAllowedMs {
+		binanceEnd = oldestAllowedMs - 1
+	}
+	if binanceEnd >= req.StartMs {
+		binanceCandles, err := binance.FetchFuturesKlinesPaged(
+			client,
+			req.Coin,
+			req.Interval,
+			req.StartMs,
+			binanceEnd,
+			499,
+		)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, binanceCandles...)
+	}
+
+	if req.EndMs >= oldestAllowedMs {
+		hlStart := oldestAllowedMs
+		if hlStart < req.StartMs {
+			hlStart = req.StartMs
+		}
+		hlCandles, err := executors.FetchAllCandlesHyperliquid(
+			client,
+			endpoint,
+			req.Coin,
+			req.Interval,
+			hlStart,
+			req.EndMs,
+		)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, hlCandles...)
+	}
+
+	return out, nil
 }

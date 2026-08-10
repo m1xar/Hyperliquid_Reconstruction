@@ -19,7 +19,7 @@ import (
 
 const (
 	defaultPositionWorkers = 8
-	defaultCandleWorkers   = 4
+	defaultCandleWorkers   = 2
 	defaultTimeout         = 20 * time.Second
 )
 
@@ -65,6 +65,12 @@ func GetBuiltPositions(
 	orderIdx := helpers.BuildOrderIndex(orders)
 	fills = helpers.NormalizeFills(fills)
 
+	cutoff := helpers.CutoffFromDays(days)
+	var minCloseMs int64
+	if cutoff != nil {
+		minCloseMs = cutoff.UnixMilli()
+	}
+
 	candleRequests := make(chan helpers.CandleRequest, defaultCandleWorkers)
 	workers.StartCandleWorkers(client, endpoint, candleRequests, defaultCandleWorkers)
 
@@ -72,7 +78,7 @@ func GetBuiltPositions(
 	positionsCh := make(chan domain.Position)
 
 	go func() {
-		reconstructor.ReconstructTrades(fills, rawFundings, orderIdx, candleRequests, envelopes)
+		reconstructor.ReconstructTrades(fills, rawFundings, orderIdx, candleRequests, envelopes, minCloseMs)
 		close(envelopes)
 		close(candleRequests)
 	}()
@@ -91,7 +97,6 @@ func GetBuiltPositions(
 	balanceSnapshots := builders.BuildUserBalanceSnapshotsFromPortfolio(portfolio)
 	builders.ReconstructBalancesFromRawFills(fills, &balanceSnapshots)
 	builders.AttachBalanceInitToPositions(&positions, balanceSnapshots)
-	cutoff := helpers.CutoffFromDays(days)
 	positions = helpers.FilterPositionsByClosedAt(positions, cutoff)
 	for i := range positions {
 		positions[i].Pair = helpers.NormalizeContractName(positions[i].Pair)
@@ -140,7 +145,7 @@ func GetClosedPositionByExactMatch(
 	positionsCh := make(chan domain.Position)
 
 	go func() {
-		reconstructor.ReconstructTrades(fills, rawFundings, orderIdx, candleRequests, envelopes)
+		reconstructor.ReconstructTrades(fills, rawFundings, orderIdx, candleRequests, envelopes, 0)
 		close(envelopes)
 		close(candleRequests)
 	}()
@@ -332,41 +337,65 @@ func GetCandles(
 	endMs := endTime.UnixMilli()
 
 	oldestAllowedMs := time.Now().UnixMilli() - intervalMs*5000
-	if startMs < oldestAllowedMs {
-		candles, err := binance.FetchFuturesKlinesPaged(
+	if startMs >= oldestAllowedMs {
+		candles, err := executors.FetchAllCandlesHyperliquid(
 			client,
+			endpoint,
 			coin,
 			interval,
 			startMs,
 			endMs,
-			499,
 		)
 		if err != nil {
 			return nil, err
 		}
-
 		for i := range candles {
 			candles[i].S = helpers.NormalizeContractName(candles[i].S)
 		}
 		return candles, nil
 	}
 
-	candles, err := executors.FetchAllCandlesHyperliquid(
-		client,
-		endpoint,
-		coin,
-		interval,
-		startMs,
-		endMs,
-	)
-	if err != nil {
-		return nil, err
+	var out []hlmodels.HyperliquidCandle
+	binanceEnd := endMs
+	if binanceEnd > oldestAllowedMs {
+		binanceEnd = oldestAllowedMs - 1
 	}
-
-	for i := range candles {
-		candles[i].S = helpers.NormalizeContractName(candles[i].S)
+	if binanceEnd >= startMs {
+		candles, err := binance.FetchFuturesKlinesPaged(
+			client,
+			coin,
+			interval,
+			startMs,
+			binanceEnd,
+			499,
+		)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, candles...)
 	}
-	return candles, nil
+	if endMs >= oldestAllowedMs {
+		hlStart := oldestAllowedMs
+		if hlStart < startMs {
+			hlStart = startMs
+		}
+		candles, err := executors.FetchAllCandlesHyperliquid(
+			client,
+			endpoint,
+			coin,
+			interval,
+			hlStart,
+			endMs,
+		)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, candles...)
+	}
+	for i := range out {
+		out[i].S = helpers.NormalizeContractName(out[i].S)
+	}
+	return out, nil
 }
 
 func GetOpenPositions(
