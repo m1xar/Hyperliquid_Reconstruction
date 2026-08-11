@@ -186,7 +186,13 @@ func GetBalanceSnapshots(
 	days int,
 ) ([]domain.UserBalanceSnapshot, error) {
 	client = authClient(client, creds)
+	return balanceSnapshotsFromClient(client, days)
+}
 
+// balanceSnapshotsFromClient assumes client already has auth attached.
+// Used to avoid resty "Overwriting an existing pre-request hook" when callers
+// fall back into snapshot fetch on an already-authed client.
+func balanceSnapshotsFromClient(client *resty.Client, days int) ([]domain.UserBalanceSnapshot, error) {
 	logs, err := executors.FetchAllAccountLog(client, days)
 	if err != nil {
 		return nil, err
@@ -223,7 +229,7 @@ func GetCurrentBalance(
 		}
 	}
 
-	snapshots, snapErr := GetBalanceSnapshots(client, creds, 0)
+	snapshots, snapErr := balanceSnapshotsFromClient(client, 0)
 	if snapErr != nil {
 		if err != nil {
 			return nil, err
