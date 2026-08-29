@@ -259,32 +259,3 @@ func contractVolumeToBase(volume, contractSize float64) float64 {
 	}
 	return volume * contractSize
 }
-
-func ApplyMAEMFE(pos *domain.Position, high, low *float64) {
-	if high == nil || low == nil {
-		return
-	}
-	entry := pos.EntryPrice
-	exit := pos.ExitPrice
-
-	amount := pos.Amount
-	priceDelta := exit - entry
-	if pos.Side == "SHORT" {
-		priceDelta = entry - exit
-	}
-	if priceDelta != 0 {
-		amount = math.Abs(pos.Pnl / priceDelta)
-	}
-
-	if pos.Side == "LONG" {
-		maeVal := helpers.Round8((*low - entry) * amount)
-		mfeVal := helpers.Round8((*high - entry) * amount)
-		pos.MAE = &maeVal
-		pos.MFE = &mfeVal
-	} else {
-		maeVal := helpers.Round8((entry - *high) * amount)
-		mfeVal := helpers.Round8((entry - *low) * amount)
-		pos.MAE = &maeVal
-		pos.MFE = &mfeVal
-	}
-}

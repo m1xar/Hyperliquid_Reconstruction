@@ -1,14 +1,13 @@
-package builders
+package helpers
 
 import (
 	"sort"
 	"time"
 
 	"github.com/m1xar/scope360-reconstruction/pkg/domain"
-	"github.com/m1xar/scope360-reconstruction/pkg/hyperliquid/service/reconstructor/helpers"
 )
 
-func AttachBalanceInitToPositions(
+func AttachBalanceInit(
 	positions *[]domain.Position,
 	snapshots []domain.UserBalanceSnapshot,
 ) {
@@ -27,14 +26,14 @@ func AttachBalanceInitToPositions(
 
 		idx := lastSnapshotBefore(snaps, pos.CreatedAt)
 		if idx >= 0 {
-			pos.BalanceInit = helpers.Round8(snaps[idx].Balance)
+			pos.BalanceInit = Round8(snaps[idx].Balance)
 			continue
 		}
 
 		if pos.ClosedAt != nil && !pos.ClosedAt.IsZero() {
-			idx = firstSnapshotAfter(snaps, *pos.ClosedAt)
+			idx = firstSnapshotAfterNonZero(snaps, *pos.ClosedAt)
 			if idx >= 0 {
-				pos.BalanceInit = helpers.Round8(snaps[idx].Balance - pos.NetPnl)
+				pos.BalanceInit = Round8(snaps[idx].Balance - pos.NetPnl)
 			}
 		}
 	}
@@ -48,7 +47,7 @@ func lastSnapshotBefore(snapshots []domain.UserBalanceSnapshot, atTime time.Time
 	return idx - 1
 }
 
-func firstSnapshotAfter(snapshots []domain.UserBalanceSnapshot, at time.Time) int {
+func firstSnapshotAfterNonZero(snapshots []domain.UserBalanceSnapshot, at time.Time) int {
 	start := sort.Search(len(snapshots), func(i int) bool {
 		return snapshots[i].CreatedAt.After(at)
 	})

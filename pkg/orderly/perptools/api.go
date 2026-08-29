@@ -24,28 +24,22 @@ func newClient(httpClient *resty.Client, cfg connector.Config) *connector.Client
 func GetBuiltPositions(client *resty.Client, cfg connector.Config, days int) ([]domain.Position, error) {
 	c := newClient(client, cfg)
 
-	positions, err := reconstructor.ReconstructClosedPositions(c, "")
-	if err != nil {
-		return nil, err
-	}
-	if err := builders.EnrichPositionsWithCurrentRisk(c, &positions); err != nil {
-		return nil, err
-	}
-	assetHistory, err := executors.FetchAssetHistory(c)
-	if err != nil {
-		return nil, err
-	}
-	markPrices, err := executors.FetchMarkPrices(c)
-	if err != nil {
-		return nil, err
-	}
-	balanceSnapshots, err := builders.BuildSyntheticBalanceSnapshotsFromTransfersAndClosedPositions(assetHistory, positions, markPrices)
-	if err != nil {
-		return nil, err
-	}
-	builders.AttachBalanceInitToPositions(&positions, balanceSnapshots)
-
 	cutoff := helpers.CutoffFromDays(days)
+
+	positions, err := reconstructor.ReconstructClosedPositions(c, "", cutoff)
+	if err != nil {
+		return nil, err
+	}
+	if err := reconstructor.EnrichPositionsWithCurrentRisk(c, &positions); err != nil {
+		return nil, err
+	}
+
+	snapshots, err := reconstructor.BalanceSnapshots(c, positions, cutoff)
+	if err != nil {
+		return nil, err
+	}
+	helpers.AttachBalanceInit(&positions, snapshots)
+
 	positions = helpers.FilterPositionsByClosedAt(positions, cutoff)
 
 	return positions, nil
@@ -77,25 +71,18 @@ func GetClosedPositionByExactMatch(
 func GetBalanceSnapshots(client *resty.Client, cfg connector.Config, days int) ([]domain.UserBalanceSnapshot, error) {
 	c := newClient(client, cfg)
 
-	positions, err := reconstructor.ReconstructClosedPositions(c, "")
-	if err != nil {
-		return nil, err
-	}
-
-	assetHistory, err := executors.FetchAssetHistory(c)
-	if err != nil {
-		return nil, err
-	}
-	markPrices, err := executors.FetchMarkPrices(c)
-	if err != nil {
-		return nil, err
-	}
-	snapshots, err := builders.BuildSyntheticBalanceSnapshotsFromTransfersAndClosedPositions(assetHistory, positions, markPrices)
-	if err != nil {
-		return nil, err
-	}
-
 	cutoff := helpers.CutoffFromDays(days)
+
+	positions, err := reconstructor.ReconstructClosedPositions(c, "", cutoff)
+	if err != nil {
+		return nil, err
+	}
+
+	snapshots, err := reconstructor.BalanceSnapshots(c, positions, cutoff)
+	if err != nil {
+		return nil, err
+	}
+
 	snapshots = helpers.FilterBalanceSnapshotsByCreatedAt(snapshots, cutoff)
 
 	sort.Slice(snapshots, func(i, j int) bool {
@@ -106,15 +93,14 @@ func GetBalanceSnapshots(client *resty.Client, cfg connector.Config, days int) (
 }
 
 func GetCurrentBalance(client *resty.Client, cfg connector.Config) (*float64, error) {
-	snapshots, err := GetBalanceSnapshots(client, cfg, 0)
+	c := newClient(client, cfg)
+
+	snapshot, err := executors.FetchPositionsSnapshot(c)
 	if err != nil {
 		return nil, err
 	}
-	if len(snapshots) == 0 {
-		return nil, nil
-	}
 
-	balance := snapshots[len(snapshots)-1].Balance
+	balance := helpers.Round8(snapshot.AccountValue)
 	return &balance, nil
 }
 
@@ -207,41 +193,8 @@ func GetOpenPositions(client *resty.Client, cfg connector.Config) ([]domain.Open
 	}
 
 	positions := builders.BuildOpenPositions(rawPositions)
-	enrichOpenPositionOrders(c, positions)
+	reconstructor.EnrichOpenPositionOrders(c, positions)
 	return positions, nil
-}
-
-func enrichOpenPositionOrders(c *connector.Client, positions []domain.OpenPosition) {
-	if len(positions) == 0 {
-		return
-	}
-
-	trades, err := executors.FetchAllTrades(c, "", 0, 0)
-	if err != nil {
-		return
-	}
-
-	orders, err := executors.FetchFilledOrders(c, "", 0, 0)
-	orderMap := map[int64]models.OrderlyOrder{}
-	if err == nil {
-		orderMap = helpers.BuildOrderMap(orders)
-	}
-
-	for i := range positions {
-		pos := &positions[i]
-		openMs := pos.OpenTime.UnixMilli()
-		matched := make([]models.OrderlyTrade, 0)
-		for _, t := range trades {
-			if helpers.NormalizeSymbol(t.Symbol) != pos.Pair {
-				continue
-			}
-			if t.ExecutedTimestamp < openMs {
-				continue
-			}
-			matched = append(matched, t)
-		}
-		pos.Orders = builders.BuildOpenOrdersFromTrades(matched, orderMap, pos.ID)
-	}
 }
 
 func ValidateWalletSubscription(address, signature, message string) (bool, error) {

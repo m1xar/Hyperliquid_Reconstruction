@@ -12,12 +12,12 @@ import (
 const positionEventsPath = "/api/history/v3/positions"
 const positionEventsRateLimitedTries = 4
 
-func FetchAllPositionEvents(client *resty.Client, days int) ([]models.PositionEventElement, error) {
+func FetchAllPositionEventsSince(client *resty.Client, since time.Time) ([]models.PositionEventElement, error) {
 	params := map[string]string{
 		"sort": "asc",
 	}
-	if days > 0 {
-		params["since"] = fmt.Sprint(time.Now().AddDate(0, 0, -days).UnixMilli())
+	if !since.IsZero() {
+		params["since"] = fmt.Sprint(since.UnixMilli())
 	}
 
 	var result []models.PositionEventElement

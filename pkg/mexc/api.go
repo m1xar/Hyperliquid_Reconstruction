@@ -3,7 +3,6 @@ package mexc
 import (
 	"fmt"
 	"sort"
-	"strings"
 	"time"
 
 	"github.com/go-resty/resty/v2"
@@ -34,29 +33,15 @@ func GetBuiltPositions(
 ) ([]domain.Position, error) {
 	mexcclient.AttachAuth(client, creds)
 
-	positions, err := reconstructor.ReconstructClosedPositions(client)
+	cutoff := helpers.CutoffFromDays(days)
+
+	positions, err := reconstructor.ReconstructClosedPositions(client, cutoff)
 	if err != nil {
 		return nil, err
 	}
 
-	cutoff := helpers.CutoffFromDays(days)
-	if cutoff != nil {
-		trimmed := positions[:0]
-		for _, pos := range positions {
-			if pos.ClosedAt != nil && !pos.ClosedAt.Before(*cutoff) {
-				trimmed = append(trimmed, pos)
-			}
-		}
-		positions = trimmed
-	}
-
-	currentEquity, err := fetchStableEquity(client)
-	if err == nil {
-		transfers, trErr := executors.FetchAllTransferRecords(client)
-		if trErr == nil && len(transfers) > 0 {
-			snapshots := builders.BuildSyntheticBalanceSnapshots(currentEquity, transfers, positions)
-			builders.AttachBalanceInit(&positions, snapshots)
-		}
+	if snapshots, err := reconstructor.BalanceSnapshots(client, positions, cutoff); err == nil {
+		helpers.AttachBalanceInit(&positions, snapshots)
 	}
 
 	return positions, nil
@@ -101,53 +86,8 @@ func GetOpenPositions(
 		}
 		positions = append(positions, builders.BuildOpenPosition(r))
 	}
-	enrichOpenPositionOrders(client, raw, positions)
+	reconstructor.EnrichOpenPositionOrders(client, raw, positions)
 	return positions, nil
-}
-
-func enrichOpenPositionOrders(
-	client *resty.Client,
-	raw []models.OpenPosition,
-	positions []domain.OpenPosition,
-) {
-	if len(raw) == 0 || len(positions) == 0 {
-		return
-	}
-
-	startMs := int64(0)
-	for _, r := range raw {
-		if r.HoldVol <= 0 {
-			continue
-		}
-		if startMs == 0 || r.CreateTime < startMs {
-			startMs = r.CreateTime
-		}
-	}
-	if startMs == 0 {
-		return
-	}
-
-	orders, err := executors.FetchAllHistoryOrders(client, startMs)
-	if err != nil {
-		return
-	}
-
-	byPositionID := make(map[int64][]models.Order)
-	for _, ord := range orders {
-		byPositionID[ord.PositionId] = append(byPositionID[ord.PositionId], ord)
-	}
-
-	posIdx := 0
-	for _, r := range raw {
-		if r.HoldVol <= 0 {
-			continue
-		}
-		if posIdx >= len(positions) {
-			return
-		}
-		positions[posIdx].Orders = builders.BuildOrders(byPositionID[r.PositionId], positions[posIdx].ID)
-		posIdx++
-	}
 }
 
 func GetBalanceSnapshots(
@@ -157,24 +97,18 @@ func GetBalanceSnapshots(
 ) ([]domain.UserBalanceSnapshot, error) {
 	mexcclient.AttachAuth(client, creds)
 
-	positions, err := reconstructor.ReconstructClosedPositions(client)
-	if err != nil {
-		return nil, err
-	}
-
-	currentEquity, err := fetchStableEquity(client)
-	if err != nil {
-		return nil, err
-	}
-
-	transfers, err := executors.FetchAllTransferRecords(client)
-	if err != nil {
-		return nil, err
-	}
-
-	snapshots := builders.BuildSyntheticBalanceSnapshots(currentEquity, transfers, positions)
-
 	cutoff := helpers.CutoffFromDays(days)
+
+	positions, err := reconstructor.ReconstructClosedPositions(client, cutoff)
+	if err != nil {
+		return nil, err
+	}
+
+	snapshots, err := reconstructor.BalanceSnapshots(client, positions, cutoff)
+	if err != nil {
+		return nil, err
+	}
+
 	if cutoff != nil {
 		filtered := snapshots[:0]
 		for _, s := range snapshots {
@@ -198,7 +132,7 @@ func GetCurrentBalance(
 ) (*float64, error) {
 	mexcclient.AttachAuth(client, creds)
 
-	val, err := fetchStableEquity(client)
+	val, err := reconstructor.FetchStableEquity(client)
 	if err != nil {
 		return nil, err
 	}
@@ -279,39 +213,4 @@ func GetCandles(
 		client, symbol, interval,
 		startTime.UnixMilli(), endTime.UnixMilli(),
 	)
-}
-
-func fetchStableEquity(client *resty.Client) (float64, error) {
-	assets, err := executors.FetchAssets(client)
-	if err == nil {
-		var total float64
-		var found bool
-		for _, asset := range assets {
-			if isStableCurrency(asset.Currency) {
-				total += asset.Equity
-				found = true
-			}
-		}
-		if found {
-			return helpers.Round8(total), nil
-		}
-	}
-
-	asset, fallbackErr := executors.FetchUSDTAsset(client)
-	if fallbackErr != nil {
-		if err != nil {
-			return 0, err
-		}
-		return 0, fallbackErr
-	}
-	return helpers.Round8(asset.Equity), nil
-}
-
-func isStableCurrency(currency string) bool {
-	switch strings.ToUpper(strings.TrimSpace(currency)) {
-	case "USDT", "USDC":
-		return true
-	default:
-		return false
-	}
 }

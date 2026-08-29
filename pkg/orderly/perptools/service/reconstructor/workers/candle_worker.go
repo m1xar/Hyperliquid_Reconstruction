@@ -5,7 +5,9 @@ import (
 
 	orderly "github.com/m1xar/scope360-reconstruction/pkg/orderly/perptools/connector/orderly"
 	"github.com/m1xar/scope360-reconstruction/pkg/orderly/perptools/connector/orderly/executors"
+	"github.com/m1xar/scope360-reconstruction/pkg/orderly/perptools/connector/orderly/models"
 	"github.com/m1xar/scope360-reconstruction/pkg/orderly/perptools/service/reconstructor/helpers"
+	"github.com/m1xar/scope360-reconstruction/pkg/reconstruction/candlespan"
 )
 
 func StartCandleWorkers(
@@ -19,13 +21,7 @@ func StartCandleWorkers(
 		go func() {
 			defer wg.Done()
 			for req := range requests {
-				candles, err := executors.FetchCandles(
-					client,
-					req.Symbol,
-					req.Interval,
-					req.StartMs,
-					req.EndMs,
-				)
+				candles, err := fetchSpan(client, req)
 				req.ReplyCh <- helpers.CandleResponse{Candles: candles, Err: err}
 			}
 		}()
@@ -33,4 +29,16 @@ func StartCandleWorkers(
 	go func() {
 		wg.Wait()
 	}()
+}
+
+func fetchSpan(client *orderly.Client, req helpers.CandleRequest) ([]models.OrderlyCandle, error) {
+	var out []models.OrderlyCandle
+	for _, segment := range candlespan.Split(req.StartMs, req.EndMs) {
+		candles, err := executors.FetchCandles(client, req.Symbol, segment.Interval, segment.StartMs, segment.EndMs)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, candles...)
+	}
+	return out, nil
 }

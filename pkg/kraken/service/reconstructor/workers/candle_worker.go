@@ -3,7 +3,9 @@ package workers
 import (
 	"github.com/go-resty/resty/v2"
 	"github.com/m1xar/scope360-reconstruction/pkg/kraken/connector/kraken/executors"
+	"github.com/m1xar/scope360-reconstruction/pkg/kraken/connector/kraken/models"
 	"github.com/m1xar/scope360-reconstruction/pkg/kraken/service/reconstructor/helpers"
+	"github.com/m1xar/scope360-reconstruction/pkg/reconstruction/candlespan"
 )
 
 func StartCandleWorkers(
@@ -14,9 +16,21 @@ func StartCandleWorkers(
 	for i := 0; i < workerCount; i++ {
 		go func() {
 			for req := range requests {
-				candles, err := executors.FetchCandles(client, req.TickType, req.Symbol, req.Interval, req.StartMs, req.EndMs)
+				candles, err := fetchSpan(client, req)
 				req.ReplyCh <- helpers.CandleResponse{Candles: candles, Err: err}
 			}
 		}()
 	}
+}
+
+func fetchSpan(client *resty.Client, req helpers.CandleRequest) ([]models.Candle, error) {
+	var out []models.Candle
+	for _, segment := range candlespan.Split(req.StartMs, req.EndMs) {
+		candles, err := executors.FetchCandles(client, req.TickType, req.Symbol, segment.Interval, segment.StartMs, segment.EndMs)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, candles...)
+	}
+	return out, nil
 }

@@ -5,6 +5,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/m1xar/scope360-reconstruction/pkg/domain"
 	"github.com/m1xar/scope360-reconstruction/pkg/orderly/perptools/connector/orderly/models"
 )
 
@@ -26,13 +27,6 @@ func SymbolFromPair(pair string) string {
 		}
 	}
 	return "PERP_" + pair + "_USDC"
-}
-
-func TradeSideToPositionSide(side string) string {
-	if strings.EqualFold(side, "BUY") {
-		return "LONG"
-	}
-	return "SHORT"
 }
 
 func CutoffFromDays(days int) *time.Time {
@@ -61,4 +55,18 @@ func GetHighLow(candles []models.OrderlyCandle) (high, low *float64) {
 	}
 
 	return &h, &l
+}
+
+func BalanceWindowStart(positions []domain.Position, cutoff *time.Time) *time.Time {
+	if cutoff == nil {
+		return nil
+	}
+
+	start := *cutoff
+	for _, pos := range positions {
+		if pos.CreatedAt.Before(start) {
+			start = pos.CreatedAt
+		}
+	}
+	return &start
 }

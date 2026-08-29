@@ -2,7 +2,6 @@ package blofin
 
 import (
 	"fmt"
-	"sort"
 	"time"
 
 	"github.com/go-resty/resty/v2"
@@ -11,9 +10,7 @@ import (
 	"github.com/m1xar/scope360-reconstruction/pkg/blofin/connector/blofin/models"
 	"github.com/m1xar/scope360-reconstruction/pkg/blofin/service/reconstructor"
 	"github.com/m1xar/scope360-reconstruction/pkg/blofin/service/reconstructor/builders"
-	"github.com/m1xar/scope360-reconstruction/pkg/blofin/service/reconstructor/envelope"
 	"github.com/m1xar/scope360-reconstruction/pkg/blofin/service/reconstructor/helpers"
-	"github.com/m1xar/scope360-reconstruction/pkg/blofin/service/reconstructor/workers"
 	"github.com/m1xar/scope360-reconstruction/pkg/domain"
 )
 
@@ -21,8 +18,6 @@ const (
 	defaultCandleWorkers   = 4
 	defaultPositionWorkers = 8
 )
-
-const historyLookback = 1 * time.Minute
 
 func GetAuthStatus(apiKey, secret, passphrase string) string {
 	if err := blofinclient.CheckAccount(apiKey, secret, passphrase); err != nil {
@@ -39,83 +34,7 @@ func GetBuiltPositions(
 ) ([]domain.Position, error) {
 	blofinclient.AttachAuth(client, creds)
 
-	minCloseMs := int64(0)
-	if cutoff := helpers.CutoffFromDays(days); cutoff != nil {
-		minCloseMs = cutoff.UnixMilli()
-	}
-	fills, err := executors.FetchAllFills(client, blofinclient.BaseURL, 0)
-	if err != nil {
-		return nil, err
-	}
-	if len(fills) == 0 {
-		return []domain.Position{}, nil
-	}
-
-	instruments, err := executors.FetchInstruments(client, blofinclient.BaseURL)
-	if err != nil {
-		return nil, err
-	}
-
-	oldestMs := helpers.OldestFillMs(fills) - historyLookback.Milliseconds()
-
-	orders, err := executors.FetchAllOrders(client, blofinclient.BaseURL, oldestMs)
-	if err != nil {
-		return nil, err
-	}
-
-	fundings, err := executors.FetchAllFundingFees(client, blofinclient.BaseURL, oldestMs)
-	if err != nil {
-		fundings = nil
-	}
-
-	candleRequests := make(chan helpers.CandleRequest, defaultCandleWorkers)
-	workers.StartCandleWorkers(client, blofinclient.BaseURL, candleRequests, defaultCandleWorkers)
-
-	envelopes := make(chan envelope.PositionEnvelope)
-	positionsCh := make(chan domain.Position)
-
-	go func() {
-		reconstructor.ReconstructPositions(
-			fills, helpers.IndexOrdersByID(orders), fundings, instruments,
-			candleRequests, envelopes, minCloseMs,
-		)
-		close(envelopes)
-		close(candleRequests)
-	}()
-
-	workers.StartPositionBuilders(envelopes, positionsCh, defaultPositionWorkers)
-
-	positions := make([]domain.Position, 0)
-	for pos := range positionsCh {
-		positions = append(positions, pos)
-	}
-
-	sort.Slice(positions, func(i, j int) bool {
-		return positions[i].ClosedAt.Before(*positions[j].ClosedAt)
-	})
-
-	if snapshots, err := balanceSnapshots(client, positions); err == nil {
-		helpers.AttachBalanceInit(&positions, snapshots)
-	}
-
-	return positions, nil
-}
-
-func balanceSnapshots(
-	client *resty.Client,
-	positions []domain.Position,
-) ([]domain.UserBalanceSnapshot, error) {
-	currentEquity, err := executors.FetchTotalEquity(client, blofinclient.BaseURL)
-	if err != nil {
-		return nil, err
-	}
-
-	transfers, err := executors.FetchAllTransfers(client, blofinclient.BaseURL, 0)
-	if err != nil {
-		return nil, err
-	}
-
-	return builders.BuildSyntheticBalanceSnapshots(currentEquity, transfers, positions), nil
+	return reconstructor.ReconstructClosedPositions(client, blofinclient.BaseURL, helpers.CutoffFromDays(days))
 }
 
 func GetClosedPositionByExactMatch(
@@ -145,32 +64,7 @@ func GetOpenPositions(
 ) ([]domain.OpenPosition, error) {
 	blofinclient.AttachAuth(client, creds)
 
-	raw, err := executors.FetchOpenPositions(client, blofinclient.BaseURL)
-	if err != nil {
-		return nil, err
-	}
-	if len(raw) == 0 {
-		return []domain.OpenPosition{}, nil
-	}
-
-	instruments, err := executors.FetchInstruments(client, blofinclient.BaseURL)
-	if err != nil {
-		return nil, err
-	}
-
-	startMs := helpers.OldestPositionMs(raw) - historyLookback.Milliseconds()
-
-	fills, err := executors.FetchAllFills(client, blofinclient.BaseURL, startMs)
-	if err != nil {
-		return nil, err
-	}
-
-	orders, err := executors.FetchAllOrders(client, blofinclient.BaseURL, startMs)
-	if err != nil {
-		return nil, err
-	}
-
-	return builders.BuildOpenPositions(raw, fills, helpers.IndexOrdersByID(orders), instruments), nil
+	return reconstructor.ReconstructOpenPositions(client, blofinclient.BaseURL)
 }
 
 func GetBalanceSnapshots(
@@ -179,17 +73,18 @@ func GetBalanceSnapshots(
 	days int,
 ) ([]domain.UserBalanceSnapshot, error) {
 
-	positions, err := GetBuiltPositions(client, creds, 0)
-	if err != nil {
-		return nil, err
-	}
-
-	snapshots, err := balanceSnapshots(client, positions)
-	if err != nil {
-		return nil, err
-	}
-
 	cutoff := helpers.CutoffFromDays(days)
+
+	positions, err := GetBuiltPositions(client, creds, days)
+	if err != nil {
+		return nil, err
+	}
+
+	snapshots, err := reconstructor.BalanceSnapshots(client, blofinclient.BaseURL, positions, cutoff)
+	if err != nil {
+		return nil, err
+	}
+
 	if cutoff == nil {
 		return snapshots, nil
 	}

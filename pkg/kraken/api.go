@@ -11,12 +11,10 @@ import (
 	krakenclient "github.com/m1xar/scope360-reconstruction/pkg/kraken/connector/kraken"
 	"github.com/m1xar/scope360-reconstruction/pkg/kraken/connector/kraken/executors"
 	"github.com/m1xar/scope360-reconstruction/pkg/kraken/connector/kraken/models"
+	"github.com/m1xar/scope360-reconstruction/pkg/kraken/service/reconstructor"
 	"github.com/m1xar/scope360-reconstruction/pkg/kraken/service/reconstructor/builders"
 	"github.com/m1xar/scope360-reconstruction/pkg/kraken/service/reconstructor/helpers"
-	"github.com/m1xar/scope360-reconstruction/pkg/kraken/service/reconstructor/workers"
 )
-
-const defaultCandleWorkers = 4
 
 func authClient(client *resty.Client, creds krakenclient.Credentials) *resty.Client {
 	if client == nil {
@@ -41,44 +39,7 @@ func GetBuiltPositions(
 ) ([]domain.Position, error) {
 	client = authClient(client, creds)
 
-	fills, err := executors.FetchAllFills(client, days)
-	if err != nil {
-		return nil, err
-	}
-	if len(fills) == 0 {
-		return []domain.Position{}, nil
-	}
-
-	positionEvents, err := executors.FetchAllPositionEvents(client, days)
-	if err != nil {
-		return nil, err
-	}
-
-	pairBySymbol := buildPairMap(client, symbolsFromFillsAndEvents(fills, positionEvents))
-	positions, err := builders.BuildClosedPositions(fills, positionEvents, pairBySymbol)
-	if err != nil {
-		return nil, err
-	}
-
-	enrichMAEMFE(client, &positions, rawSymbolByPair(symbolsFromFillsAndEvents(fills, positionEvents), pairBySymbol))
-
-	cutoff := helpers.CutoffFromDays(days)
-	if cutoff != nil {
-		filtered := positions[:0]
-		for _, pos := range positions {
-			if pos.ClosedAt != nil && !pos.ClosedAt.Before(*cutoff) {
-				filtered = append(filtered, pos)
-			}
-		}
-		positions = filtered
-	}
-
-	if logs, err := executors.FetchAllAccountLog(client, days); err == nil {
-		snapshots := builders.BuildBalanceSnapshots(logs)
-		helpers.AttachBalanceInit(&positions, snapshots)
-	}
-
-	return positions, nil
+	return reconstructor.ReconstructClosedPositions(client, helpers.CutoffFromDays(days))
 }
 
 func GetClosedPositionByExactMatch(
@@ -134,50 +95,8 @@ func GetOpenPositions(
 		ticker := tickerBySymbol[strings.ToUpper(pos.Symbol)]
 		out = append(out, builders.BuildOpenPosition(pos, ticker))
 	}
-	enrichOpenPositionOrders(client, rawPositions, out)
+	reconstructor.EnrichOpenPositionOrders(client, rawPositions, out)
 	return out, nil
-}
-
-func enrichOpenPositionOrders(
-	client *resty.Client,
-	raw []models.OpenPosition,
-	positions []domain.OpenPosition,
-) {
-	if len(raw) == 0 || len(positions) == 0 {
-		return
-	}
-
-	fills, err := executors.FetchAllFills(client, 0)
-	if err != nil {
-		return
-	}
-
-	posIdx := 0
-	for _, rawPos := range raw {
-		if rawPos.Size.Float64() <= 0 {
-			continue
-		}
-		if posIdx >= len(positions) {
-			return
-		}
-
-		openTime := positions[posIdx].OpenTime
-		symbol := strings.ToUpper(rawPos.Symbol)
-		matched := make([]models.Fill, 0)
-		for _, fill := range fills {
-			if strings.ToUpper(fill.Symbol) != symbol {
-				continue
-			}
-			fillTime, err := helpers.ParseTime(fill.FillTime)
-			if err != nil || fillTime.Before(openTime) {
-				continue
-			}
-			matched = append(matched, fill)
-		}
-
-		positions[posIdx].Orders = builders.BuildOpenOrdersFromFills(matched, positions[posIdx].ID)
-		posIdx++
-	}
 }
 
 func GetBalanceSnapshots(
@@ -224,7 +143,7 @@ func GetCurrentBalance(
 
 	accounts, err := executors.FetchAccounts(client)
 	if err == nil {
-		if val, ok := currentBalanceFromAccounts(accounts); ok {
+		if val, ok := helpers.CurrentBalanceFromAccounts(accounts); ok {
 			return &val, nil
 		}
 	}
@@ -280,7 +199,7 @@ func GetFundings(
 	if err != nil {
 		return nil, err
 	}
-	pairBySymbol := buildPairMap(client, symbolsFromAccountLogs(logs))
+	pairBySymbol := reconstructor.BuildPairMap(client, helpers.SymbolsFromAccountLogs(logs))
 	fundings := builders.BuildFundings(logs, pairBySymbol)
 
 	cutoff := helpers.CutoffFromDays(days)
@@ -323,149 +242,4 @@ func GetCandles(
 		startTime.UnixMilli(),
 		endTime.UnixMilli(),
 	)
-}
-
-func enrichMAEMFE(client *resty.Client, positions *[]domain.Position, symbolByPair map[string]string) {
-	if positions == nil || len(*positions) == 0 {
-		return
-	}
-
-	candleRequests := make(chan helpers.CandleRequest, defaultCandleWorkers)
-	workers.StartCandleWorkers(client, candleRequests, defaultCandleWorkers)
-
-	type pendingCandle struct {
-		idx     int
-		replyCh chan helpers.CandleResponse
-	}
-	pending := make([]pendingCandle, 0, len(*positions))
-
-	for i := range *positions {
-		pos := &(*positions)[i]
-		if pos.ClosedAt == nil {
-			continue
-		}
-
-		replyCh := make(chan helpers.CandleResponse, 1)
-		symbol := symbolByPair[pos.Pair]
-		if symbol == "" {
-			symbol = symbolFromPair(pos.Pair)
-		}
-
-		candleRequests <- helpers.CandleRequest{
-			TickType: "trade",
-			Symbol:   symbol,
-			Interval: "1m",
-			StartMs:  pos.CreatedAt.UnixMilli(),
-			EndMs:    pos.ClosedAt.UnixMilli(),
-			ReplyCh:  replyCh,
-		}
-		pending = append(pending, pendingCandle{idx: i, replyCh: replyCh})
-	}
-	close(candleRequests)
-
-	for _, p := range pending {
-		resp := <-p.replyCh
-		if resp.Err != nil {
-			continue
-		}
-		high, low := helpers.GetHighLow(resp.Candles)
-		builders.ApplyMAEMFE(&(*positions)[p.idx], high, low)
-	}
-}
-
-func buildPairMap(client *resty.Client, symbols []string) map[string]string {
-	out := make(map[string]string, len(symbols))
-	for _, symbol := range symbols {
-		sym := strings.ToUpper(strings.TrimSpace(symbol))
-		if sym == "" {
-			continue
-		}
-		if _, ok := out[sym]; ok {
-			continue
-		}
-		ticker, err := executors.FetchTicker(client, sym)
-		if err == nil && ticker.Pair != "" {
-			out[sym] = helpers.NormalizePairText(ticker.Pair)
-			continue
-		}
-		out[sym] = helpers.NormalizePairFallback(sym)
-	}
-	return out
-}
-
-func rawSymbolByPair(symbols []string, pairBySymbol map[string]string) map[string]string {
-	out := make(map[string]string, len(symbols))
-	for _, symbol := range symbols {
-		sym := strings.ToUpper(strings.TrimSpace(symbol))
-		if sym == "" {
-			continue
-		}
-		pair := helpers.NormalizePair(sym, pairBySymbol)
-		if _, ok := out[pair]; !ok {
-			out[pair] = sym
-		}
-	}
-	return out
-}
-
-func symbolsFromFillsAndEvents(fills []models.Fill, events []models.PositionEventElement) []string {
-	set := make(map[string]struct{})
-	for _, fill := range fills {
-		set[strings.ToUpper(fill.Symbol)] = struct{}{}
-	}
-	for _, ev := range events {
-		if ev.Event.PositionUpdate.Tradeable != "" {
-			set[strings.ToUpper(ev.Event.PositionUpdate.Tradeable)] = struct{}{}
-		}
-	}
-	return keys(set)
-}
-
-func symbolsFromAccountLogs(logs []models.AccountLog) []string {
-	set := make(map[string]struct{})
-	for _, row := range logs {
-		if row.Contract != "" {
-			set[strings.ToUpper(row.Contract)] = struct{}{}
-		}
-	}
-	return keys(set)
-}
-
-func keys(set map[string]struct{}) []string {
-	out := make([]string, 0, len(set))
-	for k := range set {
-		out = append(out, k)
-	}
-	sort.Strings(out)
-	return out
-}
-
-func currentBalanceFromAccounts(resp models.AccountsResponse) (float64, bool) {
-	for name, account := range resp.Accounts {
-		if strings.EqualFold(name, "flex") {
-			if v := account.BalanceValue.Float64(); v != 0 {
-				return helpers.Round8(v), true
-			}
-			if v := account.PortfolioValue.Float64(); v != 0 {
-				return helpers.Round8(v), true
-			}
-		}
-	}
-	for _, account := range resp.Accounts {
-		if v := account.BalanceValue.Float64(); v != 0 {
-			return helpers.Round8(v), true
-		}
-		if v := account.PortfolioValue.Float64(); v != 0 {
-			return helpers.Round8(v), true
-		}
-	}
-	return 0, false
-}
-
-func symbolFromPair(pair string) string {
-	p := strings.ToUpper(strings.TrimSpace(pair))
-	if strings.HasPrefix(p, "PF_") || strings.HasPrefix(p, "PI_") || strings.HasPrefix(p, "FI_") || strings.HasPrefix(p, "FF_") {
-		return p
-	}
-	return "PF_" + p
 }

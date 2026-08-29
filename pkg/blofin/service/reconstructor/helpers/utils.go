@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/m1xar/scope360-reconstruction/pkg/blofin/connector/blofin/models"
+	"github.com/m1xar/scope360-reconstruction/pkg/domain"
 )
 
 func MustFloat(s string) float64 {
@@ -69,10 +70,6 @@ func TimeFromMs(ms string) time.Time {
 	return time.UnixMilli(MustInt64(ms)).UTC()
 }
 
-func TimeFromMs64(ms int64) time.Time {
-	return time.UnixMilli(ms).UTC()
-}
-
 func CutoffFromDays(days int) *time.Time {
 	if days <= 0 {
 		return nil
@@ -115,20 +112,6 @@ func NormalizePair(instID string) string {
 	return b.String()
 }
 
-func OldestFillMs(fills []models.Fill) int64 {
-	oldest := int64(0)
-	for _, f := range fills {
-		ts := MustInt64(f.Ts)
-		if ts == 0 {
-			continue
-		}
-		if oldest == 0 || ts < oldest {
-			oldest = ts
-		}
-	}
-	return oldest
-}
-
 func OldestPositionMs(positions []models.OpenPosition) int64 {
 	oldest := int64(0)
 	for _, p := range positions {
@@ -141,4 +124,18 @@ func OldestPositionMs(positions []models.OpenPosition) int64 {
 		}
 	}
 	return oldest
+}
+
+func BalanceWindowStart(positions []domain.Position, cutoff *time.Time) *time.Time {
+	if cutoff == nil {
+		return nil
+	}
+
+	start := *cutoff
+	for _, pos := range positions {
+		if pos.CreatedAt.Before(start) {
+			start = pos.CreatedAt
+		}
+	}
+	return &start
 }

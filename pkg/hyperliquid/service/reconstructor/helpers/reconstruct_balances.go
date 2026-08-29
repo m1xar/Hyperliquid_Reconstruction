@@ -1,12 +1,11 @@
-package builders
+package helpers
 
 import (
 	"sort"
 	"time"
 
-	"github.com/m1xar/scope360-reconstruction/pkg/hyperliquid/connector/hyperliquid/models"
 	"github.com/m1xar/scope360-reconstruction/pkg/domain"
-	"github.com/m1xar/scope360-reconstruction/pkg/hyperliquid/service/reconstructor/helpers"
+	"github.com/m1xar/scope360-reconstruction/pkg/hyperliquid/connector/hyperliquid/models"
 )
 
 func ReconstructBalancesFromRawFills(
@@ -98,9 +97,9 @@ func fixLeadingZeroAndBackfillWithSnapshots(
 
 	for j := len(earlyIdxs) - 1; j >= 0; j-- {
 		f := fills[earlyIdxs[j]]
-		pnl := helpers.MustFloat(f.ClosedPnl)
-		fee := helpers.MustFloat(f.Fee)
-		balanceInit := helpers.Round8(currentBalance - pnl + fee)
+		pnl := MustFloat(f.ClosedPnl)
+		fee := MustFloat(f.Fee)
+		balanceInit := Round8(currentBalance - pnl + fee)
 		currentBalance = balanceInit
 
 		synth = append(synth, domain.UserBalanceSnapshot{
@@ -275,9 +274,9 @@ func backfillBalanceAtTime(
 		if t <= targetMs {
 			break
 		}
-		pnl := helpers.MustFloat(fills[i].ClosedPnl)
-		fee := helpers.MustFloat(fills[i].Fee)
-		currentBalance = helpers.Round8(currentBalance - pnl + fee)
+		pnl := MustFloat(fills[i].ClosedPnl)
+		fee := MustFloat(fills[i].Fee)
+		currentBalance = Round8(currentBalance - pnl + fee)
 	}
 	return currentBalance, true
 }

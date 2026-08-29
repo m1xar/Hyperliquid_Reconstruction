@@ -76,3 +76,66 @@ func sortOrdersByUpdateTime(orders []*pb.ProtoOAOrder) {
 		return iTime < jTime
 	})
 }
+
+func DedupeOrders(orders []*pb.ProtoOAOrder) []*pb.ProtoOAOrder {
+	return dedupeOrders(orders)
+}
+
+func FetchOrdersByPositionID(
+	ctx context.Context,
+	c *connector.Client,
+	positionID int64,
+	from, to time.Time,
+) ([]*pb.ProtoOAOrder, error) {
+	session, err := c.EnsureSession(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return fetchOrdersByPositionRange(ctx, c, session.CtidTraderAccountID, positionID, from, to)
+}
+
+func fetchOrdersByPositionRange(
+	ctx context.Context,
+	c *connector.Client,
+	accountID, positionID int64,
+	from, to time.Time,
+) ([]*pb.ProtoOAOrder, error) {
+	fromMs := from.UnixMilli()
+	if fromMs < 0 {
+		fromMs = 0
+	}
+	toMs := to.UnixMilli()
+
+	req := &pb.ProtoOAOrderListByPositionIdReq{
+		CtidTraderAccountId: &accountID,
+		PositionId:          &positionID,
+		FromTimestamp:       &fromMs,
+		ToTimestamp:         &toMs,
+	}
+	var res pb.ProtoOAOrderListByPositionIdRes
+	if err := c.Do(ctx, pb.ProtoOAPayloadType_PROTO_OA_ORDER_LIST_BY_POSITION_ID_REQ, req, &res); err != nil {
+		return nil, err
+	}
+
+	orders := res.GetOrder()
+	if !res.GetHasMore() || toMs <= fromMs {
+		sortOrdersByUpdateTime(orders)
+		return orders, nil
+	}
+
+	midMs := fromMs + (toMs-fromMs)/2
+	if midMs <= fromMs || midMs >= toMs {
+		sortOrdersByUpdateTime(orders)
+		return orders, nil
+	}
+
+	left, err := fetchOrdersByPositionRange(ctx, c, accountID, positionID, time.UnixMilli(fromMs), time.UnixMilli(midMs))
+	if err != nil {
+		return nil, err
+	}
+	right, err := fetchOrdersByPositionRange(ctx, c, accountID, positionID, time.UnixMilli(midMs+1), to)
+	if err != nil {
+		return nil, err
+	}
+	return dedupeOrders(append(left, right...)), nil
+}

@@ -1,7 +1,6 @@
 package builders
 
 import (
-	"fmt"
 	"math"
 	"sort"
 	"strings"
@@ -35,11 +34,11 @@ type episode struct {
 }
 
 func BuildClosedPositions(
-	fills []models.Fill,
+	groups [][]models.Fill,
 	positionEvents []models.PositionEventElement,
 	pairBySymbol map[string]string,
 ) ([]domain.Position, error) {
-	episodes := buildEpisodes(fills)
+	episodes := buildEpisodes(groups)
 	positions := make([]domain.Position, 0, len(episodes))
 	metas := make([]episode, 0, len(episodes))
 
@@ -66,71 +65,74 @@ func BuildClosedPositions(
 	return positions, nil
 }
 
-func buildEpisodes(fills []models.Fill) []episode {
-	bySymbol := make(map[string][]models.Fill)
-	for _, fill := range fills {
-		bySymbol[strings.ToUpper(fill.Symbol)] = append(bySymbol[strings.ToUpper(fill.Symbol)], fill)
+func buildEpisodes(groups [][]models.Fill) []episode {
+	episodes := make([]episode, 0, len(groups))
+	for _, group := range groups {
+		episodes = append(episodes, splitGroup(group)...)
 	}
+	return episodes
+}
 
-	episodes := make([]episode, 0)
-	for symbol, group := range bySymbol {
-		sort.Slice(group, func(i, j int) bool {
-			ti, _ := helpers.ParseTime(group[i].FillTime)
-			tj, _ := helpers.ParseTime(group[j].FillTime)
-			if ti.Equal(tj) {
-				return group[i].FillID < group[j].FillID
+func splitGroup(group []models.Fill) []episode {
+	sorted := make([]models.Fill, len(group))
+	copy(sorted, group)
+	sort.SliceStable(sorted, func(i, j int) bool {
+		ti, _ := helpers.ParseTime(sorted[i].FillTime)
+		tj, _ := helpers.ParseTime(sorted[j].FillTime)
+		if ti.Equal(tj) {
+			return sorted[i].FillID < sorted[j].FillID
+		}
+		return ti.Before(tj)
+	})
+
+	episodes := make([]episode, 0, 1)
+	var current *episode
+	net := 0.0
+
+	for _, fill := range sorted {
+		at, err := helpers.ParseTime(fill.FillTime)
+		if err != nil {
+			continue
+		}
+		sign := helpers.SideSign(fill.Side)
+		remaining := fill.Size.Float64()
+		if remaining <= 0 {
+			continue
+		}
+
+		for remaining > sizeEpsilon {
+			if current == nil {
+				current = &episode{
+					Symbol:   strings.ToUpper(fill.Symbol),
+					OpenSign: sign,
+					OpenAt:   at,
+				}
+				net = 0
 			}
-			return ti.Before(tj)
-		})
 
-		var current *episode
-		net := 0.0
-
-		for _, fill := range group {
-			at, err := helpers.ParseTime(fill.FillTime)
-			if err != nil {
-				continue
-			}
-			sign := helpers.SideSign(fill.Side)
-			remaining := fill.Size.Float64()
-			if remaining <= 0 {
-				continue
+			partSize := remaining
+			if math.Abs(net) > sizeEpsilon && sign != current.OpenSign {
+				partSize = math.Min(math.Abs(net), remaining)
 			}
 
-			for remaining > sizeEpsilon {
-				if current == nil {
-					current = &episode{
-						Symbol:   symbol,
-						OpenSign: sign,
-						OpenAt:   at,
-					}
-					net = 0
-				}
+			current.Parts = append(current.Parts, fillPart{
+				Fill: fill,
+				Size: partSize,
+				At:   at,
+				Sign: sign,
+			})
 
-				partSize := remaining
-				if math.Abs(net) > sizeEpsilon && sign != current.OpenSign {
-					partSize = math.Min(math.Abs(net), remaining)
-				}
+			net += sign * partSize
+			if absNet := math.Abs(net); absNet > current.PeakSize {
+				current.PeakSize = absNet
+			}
+			remaining = helpers.Round8(remaining - partSize)
 
-				current.Parts = append(current.Parts, fillPart{
-					Fill: fill,
-					Size: partSize,
-					At:   at,
-					Sign: sign,
-				})
-
-				net += sign * partSize
-				if absNet := math.Abs(net); absNet > current.PeakSize {
-					current.PeakSize = absNet
-				}
-				remaining = helpers.Round8(remaining - partSize)
-
-				if math.Abs(net) < sizeEpsilon {
-					current.CloseAt = at
-					episodes = append(episodes, *current)
-					current = nil
-					net = 0
-				}
+			if math.Abs(net) < sizeEpsilon {
+				current.CloseAt = at
+				episodes = append(episodes, *current)
+				current = nil
+				net = 0
 			}
 		}
 	}
@@ -417,32 +419,4 @@ func eventTime(upd models.PositionUpdate, ev models.PositionEventElement) time.T
 		ms = ev.Timestamp
 	}
 	return time.UnixMilli(ms).UTC()
-}
-
-func ApplyMAEMFE(pos *domain.Position, high, low *float64) {
-	if high == nil || low == nil {
-		return
-	}
-	entry := pos.EntryPrice
-	amount := pos.Amount
-
-	if pos.Side == "LONG" {
-		maeVal := helpers.Round8((*low - entry) * amount)
-		mfeVal := helpers.Round8((*high - entry) * amount)
-		pos.MAE = &maeVal
-		pos.MFE = &mfeVal
-		return
-	}
-
-	maeVal := helpers.Round8((entry - *high) * amount)
-	mfeVal := helpers.Round8((entry - *low) * amount)
-	pos.MAE = &maeVal
-	pos.MFE = &mfeVal
-}
-
-func FillSignature(fill models.Fill) string {
-	if fill.FillID != "" {
-		return fill.FillID
-	}
-	return fmt.Sprintf("%s|%s|%s|%.12f|%.12f", fill.Symbol, fill.OrderID, fill.FillTime, fill.Size.Float64(), fill.Price.Float64())
 }

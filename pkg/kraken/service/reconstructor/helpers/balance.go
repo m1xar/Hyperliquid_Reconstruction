@@ -2,8 +2,10 @@ package helpers
 
 import (
 	"sort"
+	"strings"
 
 	"github.com/m1xar/scope360-reconstruction/pkg/domain"
+	"github.com/m1xar/scope360-reconstruction/pkg/kraken/connector/kraken/models"
 )
 
 func AttachBalanceInit(positions *[]domain.Position, snapshots []domain.UserBalanceSnapshot) {
@@ -26,4 +28,26 @@ func AttachBalanceInit(positions *[]domain.Position, snapshots []domain.UserBala
 			pos.BalanceInit = Round8(sorted[idx].Balance)
 		}
 	}
+}
+
+func CurrentBalanceFromAccounts(resp models.AccountsResponse) (float64, bool) {
+	for name, account := range resp.Accounts {
+		if strings.EqualFold(name, "flex") {
+			if v := account.BalanceValue.Float64(); v != 0 {
+				return Round8(v), true
+			}
+			if v := account.PortfolioValue.Float64(); v != 0 {
+				return Round8(v), true
+			}
+		}
+	}
+	for _, account := range resp.Accounts {
+		if v := account.BalanceValue.Float64(); v != 0 {
+			return Round8(v), true
+		}
+		if v := account.PortfolioValue.Float64(); v != 0 {
+			return Round8(v), true
+		}
+	}
+	return 0, false
 }

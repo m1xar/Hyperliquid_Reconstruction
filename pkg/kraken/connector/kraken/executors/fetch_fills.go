@@ -12,7 +12,7 @@ import (
 
 const (
 	fillsPath            = "/derivatives/api/v3/fills"
-	fillsPageSize        = 100
+	FillsPageSize        = 100
 	fillRateLimitedTries = 4
 	fillPaginatedPace    = 600 * time.Millisecond
 )
@@ -90,7 +90,7 @@ func FetchAllFills(client *resty.Client, days int) ([]models.Fill, error) {
 		if cutoff != nil && oldest.Before(*cutoff) {
 			break
 		}
-		if len(page) < fillsPageSize {
+		if len(page) < FillsPageSize {
 			break
 		}
 		lastFillTime = FormatKrakenTime(oldest)

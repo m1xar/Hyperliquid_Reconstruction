@@ -2,6 +2,7 @@ package reconstructor
 
 import (
 	"sort"
+	"time"
 
 	"github.com/go-resty/resty/v2"
 	"github.com/google/uuid"
@@ -15,11 +16,13 @@ import (
 
 const defaultCandleWorkers = 4
 
-func ReconstructClosedPositions(client *resty.Client) ([]domain.Position, error) {
+func ReconstructClosedPositions(client *resty.Client, cutoff *time.Time) ([]domain.Position, error) {
 	closedPositions, err := executors.FetchAllHistoryPositions(client)
 	if err != nil {
 		return nil, err
 	}
+
+	closedPositions = positionsClosedAfter(closedPositions, cutoff)
 	if len(closedPositions) == 0 {
 		return []domain.Position{}, nil
 	}
@@ -84,7 +87,7 @@ func ReconstructClosedPositions(client *resty.Client) ([]domain.Position, error)
 		resp := <-p.replyCh
 		if resp.Err == nil {
 			high, low := helpers.GetHighLow(resp.Candles)
-			builders.ApplyMAEMFE(&positions[p.idx], high, low)
+			helpers.ApplyMAEMFE(&positions[p.idx], high, low)
 		}
 	}
 
@@ -107,6 +110,22 @@ func ReconstructClosedPositions(client *resty.Client) ([]domain.Position, error)
 	})
 
 	return positions, nil
+}
+
+func positionsClosedAfter(positions []models.HistoryPosition, cutoff *time.Time) []models.HistoryPosition {
+	if cutoff == nil {
+		return positions
+	}
+
+	cutoffMs := cutoff.UnixMilli()
+	kept := make([]models.HistoryPosition, 0, len(positions))
+	for _, pos := range positions {
+		if pos.UpdateTime < cutoffMs {
+			continue
+		}
+		kept = append(kept, pos)
+	}
+	return kept
 }
 
 func fetchContractSizes(client *resty.Client, positions []models.HistoryPosition) map[string]float64 {
@@ -133,4 +152,98 @@ func fetchContractSizes(client *resty.Client, positions []models.HistoryPosition
 	}
 
 	return sizes
+}
+
+func FetchStableEquity(client *resty.Client) (float64, error) {
+	assets, err := executors.FetchAssets(client)
+	if err == nil {
+		var total float64
+		var found bool
+		for _, asset := range assets {
+			if helpers.IsStableCurrency(asset.Currency) {
+				total += asset.Equity
+				found = true
+			}
+		}
+		if found {
+			return helpers.Round8(total), nil
+		}
+	}
+
+	asset, fallbackErr := executors.FetchUSDTAsset(client)
+	if fallbackErr != nil {
+		if err != nil {
+			return 0, err
+		}
+		return 0, fallbackErr
+	}
+	return helpers.Round8(asset.Equity), nil
+}
+
+func BalanceSnapshots(
+	client *resty.Client,
+	positions []domain.Position,
+	cutoff *time.Time,
+) ([]domain.UserBalanceSnapshot, error) {
+	currentEquity, err := FetchStableEquity(client)
+	if err != nil {
+		return nil, err
+	}
+
+	transfers, err := executors.FetchAllTransferRecords(client)
+	if err != nil {
+		return nil, err
+	}
+
+	return builders.BuildBalanceSnapshots(
+		currentEquity,
+		transfers,
+		positions,
+		helpers.BalanceWindowStart(positions, cutoff),
+	), nil
+}
+
+func EnrichOpenPositionOrders(
+	client *resty.Client,
+	raw []models.OpenPosition,
+	positions []domain.OpenPosition,
+) {
+	if len(raw) == 0 || len(positions) == 0 {
+		return
+	}
+
+	startMs := int64(0)
+	for _, r := range raw {
+		if r.HoldVol <= 0 {
+			continue
+		}
+		if startMs == 0 || r.CreateTime < startMs {
+			startMs = r.CreateTime
+		}
+	}
+	if startMs == 0 {
+		return
+	}
+
+	orders, err := executors.FetchAllHistoryOrders(client, startMs)
+	if err != nil {
+		return
+	}
+
+	byPositionID := make(map[int64][]models.Order)
+	for _, ord := range orders {
+		byPositionID[ord.PositionId] = append(byPositionID[ord.PositionId], ord)
+	}
+
+	posIdx := 0
+	for _, r := range raw {
+		if r.HoldVol <= 0 {
+			continue
+		}
+		if posIdx >= len(positions) {
+			return
+		}
+		positions[posIdx].Orders = builders.BuildOrders(byPositionID[r.PositionId], positions[posIdx].ID)
+		posIdx++
+	}
 }

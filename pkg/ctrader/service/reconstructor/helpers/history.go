@@ -2,11 +2,15 @@ package helpers
 
 import (
 	"context"
+	"sort"
+	"time"
 
 	connector "github.com/m1xar/scope360-reconstruction/pkg/ctrader/connector/ctrader"
 	"github.com/m1xar/scope360-reconstruction/pkg/ctrader/connector/ctrader/executors"
+	"github.com/m1xar/scope360-reconstruction/pkg/ctrader/connector/ctrader/models"
 	pb "github.com/m1xar/scope360-reconstruction/pkg/ctrader/connector/ctrader/proto"
 	"github.com/m1xar/scope360-reconstruction/pkg/domain"
+	"github.com/m1xar/scope360-reconstruction/pkg/reconstruction/candlespan"
 )
 
 func LoadHistory(ctx context.Context, c *connector.Client, days int) ([]*pb.ProtoOADeal, []*pb.ProtoOAOrder, map[int64]string, *connector.Session, error) {
@@ -23,11 +27,87 @@ func LoadHistory(ctx context.Context, c *connector.Client, days int) ([]*pb.Prot
 	if err != nil {
 		return nil, nil, nil, nil, err
 	}
+	deals, orders, err = backfillTruncatedPositions(ctx, c, deals, orders, to)
+	if err != nil {
+		return nil, nil, nil, nil, err
+	}
 	symbols, err := executors.FetchSymbolNames(ctx, c)
 	if err != nil {
 		return nil, nil, nil, nil, err
 	}
 	return deals, orders, symbols, session, nil
+}
+
+func backfillTruncatedPositions(
+	ctx context.Context,
+	c *connector.Client,
+	deals []*pb.ProtoOADeal,
+	orders []*pb.ProtoOAOrder,
+	to time.Time,
+) ([]*pb.ProtoOADeal, []*pb.ProtoOAOrder, error) {
+	truncated := PositionsMissingOpeningDeal(deals)
+	if len(truncated) == 0 {
+		return deals, orders, nil
+	}
+
+	from := time.UnixMilli(0)
+
+	for _, positionID := range truncated {
+		extraDeals, err := executors.FetchDealsByPositionID(ctx, c, positionID, from, to)
+		if err != nil {
+			return nil, nil, err
+		}
+		deals = append(deals, extraDeals...)
+
+		extraOrders, err := executors.FetchOrdersByPositionID(ctx, c, positionID, from, to)
+		if err != nil {
+			return nil, nil, err
+		}
+		orders = append(orders, extraOrders...)
+	}
+
+	return executors.DedupeDeals(deals), executors.DedupeOrders(orders), nil
+}
+
+func PositionsMissingOpeningDeal(deals []*pb.ProtoOADeal) []int64 {
+	type coverage struct {
+		opened bool
+		closed bool
+	}
+
+	seen := make(map[int64]*coverage)
+	order := make([]int64, 0)
+
+	for _, deal := range deals {
+		if deal == nil || deal.GetDealStatus() != pb.ProtoOADealStatus_FILLED {
+			continue
+		}
+
+		positionID := deal.GetPositionId()
+		cov := seen[positionID]
+		if cov == nil {
+			cov = &coverage{}
+			seen[positionID] = cov
+			order = append(order, positionID)
+		}
+
+		if deal.GetClosePositionDetail() != nil {
+			cov.closed = true
+			continue
+		}
+		cov.opened = true
+	}
+
+	out := make([]int64, 0)
+	for _, positionID := range order {
+		cov := seen[positionID]
+		if cov.closed && !cov.opened {
+			out = append(out, positionID)
+		}
+	}
+
+	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
+	return out
 }
 
 func EnrichFXMAEMFE(ctx context.Context, c *connector.Client, positions []domain.FXPosition, symbols map[int64]string) {
@@ -38,7 +118,6 @@ func EnrichFXMAEMFE(ctx context.Context, c *connector.Client, positions []domain
 	for id, name := range symbols {
 		idByPair[name] = id
 	}
-	period := pb.ProtoOATrendbarPeriod_M1
 	for i := range positions {
 		pos := &positions[i]
 		if pos.ClosedAt == nil {
@@ -48,14 +127,41 @@ func EnrichFXMAEMFE(ctx context.Context, c *connector.Client, positions []domain
 		if !ok {
 			continue
 		}
-		bars, err := executors.FetchTrendbars(ctx, c, symbolID, period, pos.CreatedAt, *pos.ClosedAt, 0)
+		candles, err := trendbarsForSpan(ctx, c, symbolID, pos.Pair, pos.CreatedAt, *pos.ClosedAt)
 		if err != nil {
 			continue
 		}
-		candles := CandlesFromTrendbars(pos.Pair, "M1", bars)
 		high, low := CandleHighLow(candles)
 		ApplyFXMAEMFE(pos, high, low)
 	}
+}
+
+func trendbarsForSpan(
+	ctx context.Context,
+	c *connector.Client,
+	symbolID int64,
+	pair string,
+	from, to time.Time,
+) ([]models.Candle, error) {
+	var out []models.Candle
+
+	for _, segment := range candlespan.Split(from.UnixMilli(), to.UnixMilli()) {
+		period, err := TrendbarPeriod(segment.Interval)
+		if err != nil {
+			return nil, err
+		}
+
+		bars, err := executors.FetchTrendbars(
+			ctx, c, symbolID, period,
+			time.UnixMilli(segment.StartMs), time.UnixMilli(segment.EndMs), 0,
+		)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, CandlesFromTrendbars(pair, segment.Interval, bars)...)
+	}
+
+	return out, nil
 }
 
 func FetchCurrentPrices(ctx context.Context, c *connector.Client, reconcile *pb.ProtoOAReconcileRes) map[int64]float64 {

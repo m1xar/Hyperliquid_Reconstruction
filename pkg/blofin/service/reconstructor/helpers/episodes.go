@@ -59,77 +59,101 @@ func BuildEpisodes(fills []models.Fill, instruments map[string]models.Instrument
 
 	episodes := make([]Episode, 0)
 	for _, key := range keys {
-		group := groups[key]
-		sort.SliceStable(group, func(i, j int) bool {
-			ti, tj := MustInt64(group[i].Ts), MustInt64(group[j].Ts)
-			if ti == tj {
-				return group[i].TradeID < group[j].TradeID
-			}
-			return ti < tj
-		})
-
-		var current *Episode
-		net := 0.0
-
-		for _, fill := range group {
-			instrument := InstrumentFor(instruments, fill.InstID)
-			remaining := ContractsToBase(fill.FillSize, instrument)
-			if remaining <= sizeEpsilon {
-				continue
-			}
-			at := TimeFromMs(fill.Ts)
-			sign := fillSign(fill)
-			price := MustFloat(fill.FillPrice)
-
-			for remaining > sizeEpsilon {
-				if current == nil {
-					current = &Episode{
-						InstID:       fill.InstID,
-						PositionSide: strings.ToLower(strings.TrimSpace(fill.PositionSide)),
-						OpenSign:     sign,
-						OpenAt:       at,
-					}
-					net = 0
-				}
-
-				partSize := remaining
-				if math.Abs(net) > sizeEpsilon && sign != current.OpenSign {
-					partSize = math.Min(math.Abs(net), remaining)
-				}
-
-				current.Parts = append(current.Parts, FillPart{
-					Fill:  fill,
-					Size:  partSize,
-					Price: price,
-					At:    at,
-					Sign:  sign,
-				})
-
-				net += sign * partSize
-				if absNet := math.Abs(net); absNet > current.PeakSize {
-					current.PeakSize = absNet
-				}
-				remaining = Round8(remaining - partSize)
-
-				if math.Abs(net) < sizeEpsilon {
-					current.CloseAt = at
-					current.Closed = true
-					episodes = append(episodes, *current)
-					current = nil
-					net = 0
-				}
-			}
-		}
-
-		if current != nil {
-			current.CloseAt = current.Parts[len(current.Parts)-1].At
-			episodes = append(episodes, *current)
-		}
+		episodes = append(episodes, accumulateEpisodes(groups[key], instruments)...)
 	}
 
 	sort.SliceStable(episodes, func(i, j int) bool {
 		return episodes[i].CloseAt.Before(episodes[j].CloseAt)
 	})
+
+	return episodes
+}
+
+func BuildEpisodesFromGroups(
+	groups [][]models.Fill,
+	instruments map[string]models.Instrument,
+) []Episode {
+	episodes := make([]Episode, 0, len(groups))
+	for _, group := range groups {
+		episodes = append(episodes, accumulateEpisodes(group, instruments)...)
+	}
+
+	sort.SliceStable(episodes, func(i, j int) bool {
+		return episodes[i].CloseAt.Before(episodes[j].CloseAt)
+	})
+
+	return episodes
+}
+
+func accumulateEpisodes(group []models.Fill, instruments map[string]models.Instrument) []Episode {
+	sorted := make([]models.Fill, len(group))
+	copy(sorted, group)
+	sort.SliceStable(sorted, func(i, j int) bool {
+		ti, tj := MustInt64(sorted[i].Ts), MustInt64(sorted[j].Ts)
+		if ti == tj {
+			return sorted[i].TradeID < sorted[j].TradeID
+		}
+		return ti < tj
+	})
+
+	episodes := make([]Episode, 0, 1)
+	var current *Episode
+	net := 0.0
+
+	for _, fill := range sorted {
+		instrument := InstrumentFor(instruments, fill.InstID)
+		remaining := ContractsToBase(fill.FillSize, instrument)
+		if remaining <= sizeEpsilon {
+			continue
+		}
+		at := TimeFromMs(fill.Ts)
+		sign := fillSign(fill)
+		price := MustFloat(fill.FillPrice)
+
+		for remaining > sizeEpsilon {
+			if current == nil {
+				current = &Episode{
+					InstID:       fill.InstID,
+					PositionSide: strings.ToLower(strings.TrimSpace(fill.PositionSide)),
+					OpenSign:     sign,
+					OpenAt:       at,
+				}
+				net = 0
+			}
+
+			partSize := remaining
+			if math.Abs(net) > sizeEpsilon && sign != current.OpenSign {
+				partSize = math.Min(math.Abs(net), remaining)
+			}
+
+			current.Parts = append(current.Parts, FillPart{
+				Fill:  fill,
+				Size:  partSize,
+				Price: price,
+				At:    at,
+				Sign:  sign,
+			})
+
+			net += sign * partSize
+			if absNet := math.Abs(net); absNet > current.PeakSize {
+				current.PeakSize = absNet
+			}
+			remaining = Round8(remaining - partSize)
+
+			if math.Abs(net) < sizeEpsilon {
+				current.CloseAt = at
+				current.Closed = true
+				episodes = append(episodes, *current)
+				current = nil
+				net = 0
+			}
+		}
+	}
+
+	if current != nil {
+		current.CloseAt = current.Parts[len(current.Parts)-1].At
+		episodes = append(episodes, *current)
+	}
 
 	return episodes
 }

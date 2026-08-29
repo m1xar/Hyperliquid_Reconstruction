@@ -4,21 +4,8 @@ import (
 	"time"
 
 	"github.com/m1xar/scope360-reconstruction/pkg/domain"
+	"github.com/m1xar/scope360-reconstruction/pkg/hyperliquid/connector/hyperliquid/models"
 )
-
-func FilterPositionsByCreatedAt(positions []domain.Position, cutoff *time.Time) []domain.Position {
-	if cutoff == nil {
-		return positions
-	}
-
-	filtered := positions[:0]
-	for _, pos := range positions {
-		if !pos.CreatedAt.Before(*cutoff) {
-			filtered = append(filtered, pos)
-		}
-	}
-	return filtered
-}
 
 func FilterPositionsByClosedAt(positions []domain.Position, cutoff *time.Time) []domain.Position {
 	if cutoff == nil {
@@ -66,4 +53,23 @@ func FilterFundingsByCreatedAt(fundings []domain.UserFunding, cutoff *time.Time)
 		}
 	}
 	return filtered
+}
+
+func EpisodesClosedAfter(segments [][]models.RawFill, cutoff *time.Time) [][]models.RawFill {
+	if cutoff == nil {
+		return segments
+	}
+
+	minCloseMs := cutoff.UnixMilli()
+	kept := make([][]models.RawFill, 0, len(segments))
+	for _, cp := range segments {
+		if len(cp) == 0 {
+			continue
+		}
+		if cp[len(cp)-1].Time < minCloseMs {
+			continue
+		}
+		kept = append(kept, cp)
+	}
+	return kept
 }

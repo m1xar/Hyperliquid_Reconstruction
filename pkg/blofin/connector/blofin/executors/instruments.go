@@ -22,10 +22,3 @@ func FetchInstruments(client *resty.Client, baseURL string) (map[string]models.I
 	}
 	return instruments, nil
 }
-
-func Instrument(instruments map[string]models.Instrument, instID string) models.Instrument {
-	if inst, ok := instruments[instID]; ok && inst.ContractValue != "" {
-		return inst
-	}
-	return models.DefaultInstrument
-}

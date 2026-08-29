@@ -12,7 +12,7 @@ import (
 	"github.com/m1xar/scope360-reconstruction/pkg/orderly/perptools/service/reconstructor/helpers"
 )
 
-type syntheticBalanceEvent struct {
+type balanceEvent struct {
 	At    time.Time
 	Delta float64
 }
@@ -21,30 +21,71 @@ func isCompletedTransfer(ev models.OrderlyAssetHistory) bool {
 	return strings.EqualFold(ev.TransStatus, "COMPLETED")
 }
 
-func BuildSyntheticBalanceSnapshotsFromStableTransfersAndClosedPositions(
-	assetHistory []models.OrderlyAssetHistory,
-	positions []domain.Position,
-) []domain.UserBalanceSnapshot {
-	stableHistory := make([]models.OrderlyAssetHistory, 0, len(assetHistory))
-	for _, ev := range assetHistory {
-		if isStableToken(ev.Token) {
-			stableHistory = append(stableHistory, ev)
-		}
-	}
-	snapshots, _ := BuildSyntheticBalanceSnapshotsFromTransfersAndClosedPositions(stableHistory, positions, nil)
-	return snapshots
-}
-
-func BuildSyntheticBalanceSnapshotsFromTransfersAndClosedPositions(
+func BuildBalanceSnapshots(
+	currentEquity float64,
 	assetHistory []models.OrderlyAssetHistory,
 	positions []domain.Position,
 	markPrices map[string]float64,
+	windowStart *time.Time,
 ) ([]domain.UserBalanceSnapshot, error) {
-	events := make([]syntheticBalanceEvent, 0, len(assetHistory)+len(positions))
+	events, err := collectBalanceEvents(assetHistory, positions, markPrices, windowStart)
+	if err != nil {
+		return nil, err
+	}
 
-	var firstDepositAt *time.Time
+	now := time.Now().UTC()
+	if len(events) == 0 {
+		return []domain.UserBalanceSnapshot{
+			{CreatedAt: now, Balance: helpers.Round8(currentEquity)},
+		}, nil
+	}
+
+	snapshots := make([]domain.UserBalanceSnapshot, len(events)+2)
+
+	running := currentEquity
+	for i := len(events) - 1; i >= 0; i-- {
+		snapshots[i+1] = domain.UserBalanceSnapshot{
+			CreatedAt: events[i].At,
+			Balance:   helpers.Round8(running),
+		}
+		running -= events[i].Delta
+	}
+
+	start := events[0].At.Add(-time.Second)
+	if windowStart != nil && windowStart.Before(start) {
+		start = windowStart.UTC()
+	}
+	snapshots[0] = domain.UserBalanceSnapshot{
+		CreatedAt: start,
+		Balance:   helpers.Round8(running),
+	}
+	snapshots[len(snapshots)-1] = domain.UserBalanceSnapshot{
+		CreatedAt: now,
+		Balance:   helpers.Round8(currentEquity),
+	}
+
+	return snapshots, nil
+}
+
+func collectBalanceEvents(
+	assetHistory []models.OrderlyAssetHistory,
+	positions []domain.Position,
+	markPrices map[string]float64,
+	windowStart *time.Time,
+) ([]balanceEvent, error) {
+	events := make([]balanceEvent, 0, len(assetHistory)+len(positions))
+
+	within := func(at time.Time) bool {
+		return windowStart == nil || !at.Before(*windowStart)
+	}
+
 	for _, ev := range assetHistory {
 		if !isCompletedTransfer(ev) {
+			continue
+		}
+
+		at := time.UnixMilli(ev.CreatedTime).UTC()
+		if !within(at) {
 			continue
 		}
 
@@ -53,70 +94,29 @@ func BuildSyntheticBalanceSnapshotsFromTransfersAndClosedPositions(
 			return nil, fmt.Errorf("missing USDC mark price for token %q", ev.Token)
 		}
 
-		side := strings.ToUpper(strings.TrimSpace(ev.Side))
-		at := time.UnixMilli(ev.CreatedTime).UTC()
-
-		switch side {
+		switch strings.ToUpper(strings.TrimSpace(ev.Side)) {
 		case "DEPOSIT":
-			delta := math.Abs(ev.Amount) * price
-			events = append(events, syntheticBalanceEvent{At: at, Delta: delta})
-			if firstDepositAt == nil || at.Before(*firstDepositAt) {
-				tmp := at
-				firstDepositAt = &tmp
-			}
+			events = append(events, balanceEvent{At: at, Delta: math.Abs(ev.Amount) * price})
 		case "WITHDRAW", "WITHDRAWAL":
-			delta := -math.Abs(ev.Amount) * price
-			events = append(events, syntheticBalanceEvent{At: at, Delta: delta})
+			events = append(events, balanceEvent{At: at, Delta: -math.Abs(ev.Amount) * price})
 		}
 	}
-
-	if firstDepositAt == nil {
-		return nil, nil
-	}
-
-	start := time.Date(
-		firstDepositAt.Year(),
-		firstDepositAt.Month(),
-		firstDepositAt.Day(),
-		0, 0, 0, 0, time.UTC,
-	)
 
 	for _, pos := range positions {
 		if !pos.Closed || pos.ClosedAt == nil {
 			continue
 		}
-		if pos.ClosedAt.UTC().Before(start) {
+		at := pos.ClosedAt.UTC()
+		if !within(at) {
 			continue
 		}
-		events = append(events, syntheticBalanceEvent{
-			At:    pos.ClosedAt.UTC(),
-			Delta: pos.NetPnl,
-		})
+		events = append(events, balanceEvent{At: at, Delta: pos.NetPnl})
 	}
 
 	sort.Slice(events, func(i, j int) bool {
 		return events[i].At.Before(events[j].At)
 	})
-
-	snapshots := make([]domain.UserBalanceSnapshot, 0, len(events)+1)
-	snapshots = append(snapshots, domain.UserBalanceSnapshot{
-		CreatedAt: start,
-		Balance:   0,
-	})
-
-	balance := 0.0
-	for _, ev := range events {
-		if ev.At.Before(start) {
-			continue
-		}
-		balance = helpers.Round8(balance + ev.Delta)
-		snapshots = append(snapshots, domain.UserBalanceSnapshot{
-			CreatedAt: ev.At,
-			Balance:   balance,
-		})
-	}
-
-	return snapshots, nil
+	return events, nil
 }
 
 func isStableToken(token string) bool {

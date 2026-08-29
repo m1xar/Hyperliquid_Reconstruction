@@ -1,10 +1,9 @@
-package builders
+package helpers
 
 import (
 	"sort"
 
 	"github.com/m1xar/scope360-reconstruction/pkg/domain"
-	"github.com/m1xar/scope360-reconstruction/pkg/mexc/service/reconstructor/helpers"
 )
 
 func AttachBalanceInit(positions *[]domain.Position, snapshots []domain.UserBalanceSnapshot) {
@@ -24,10 +23,10 @@ func AttachBalanceInit(positions *[]domain.Position, snapshots []domain.UserBala
 			return sorted[k].CreatedAt.UnixNano() > pos.CreatedAt.UnixNano()
 		}) - 1
 		if idx >= 0 {
-			pos.BalanceInit = helpers.Round8(sorted[idx].Balance)
+			pos.BalanceInit = Round8(sorted[idx].Balance)
 		}
 		if pos.BalanceInit < 1 {
-			pos.BalanceInit = helpers.Round8(pos.Amount * pos.EntryPrice)
+			pos.BalanceInit = Round8(pos.Amount * pos.EntryPrice)
 		}
 	}
 }

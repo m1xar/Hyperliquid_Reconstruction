@@ -11,7 +11,7 @@ import (
 
 const fillsHistoryPath = "/api/v1/trade/fills-history"
 
-const fillsPageLimit = 100
+const FillsPageLimit = 100
 
 func FetchAllFills(client *resty.Client, baseURL string, startMs int64) ([]models.Fill, error) {
 	var result []models.Fill
@@ -19,7 +19,7 @@ func FetchAllFills(client *resty.Client, baseURL string, startMs int64) ([]model
 	after := ""
 	for {
 		params := map[string]string{
-			"limit": fmt.Sprintf("%d", fillsPageLimit),
+			"limit": fmt.Sprintf("%d", FillsPageLimit),
 		}
 		if startMs > 0 {
 			params["begin"] = fmt.Sprint(startMs)
@@ -56,11 +56,28 @@ func FetchAllFills(client *resty.Client, baseURL string, startMs int64) ([]model
 			break
 		}
 
-		if len(page) < fillsPageLimit {
+		if len(page) < FillsPageLimit {
 			break
 		}
 		after = page[len(page)-1].TradeID
 	}
 
 	return result, nil
+}
+
+func FetchFillsPage(client *resty.Client, baseURL, after string, limit int) ([]models.Fill, error) {
+	if limit <= 0 {
+		limit = FillsPageLimit
+	}
+
+	params := map[string]string{
+		"limit": fmt.Sprintf("%d", limit),
+	}
+	if after != "" {
+		params["after"] = after
+	}
+
+	return doWithRateLimit(func() ([]models.Fill, error) {
+		return blofin.DoGet[[]models.Fill](client, baseURL, fillsHistoryPath, params)
+	})
 }

@@ -1,0 +1,224 @@
+package reconstructor
+
+import (
+	"sort"
+	"strings"
+
+	"github.com/go-resty/resty/v2"
+	"github.com/google/uuid"
+	"github.com/m1xar/scope360-reconstruction/pkg/domain"
+	"github.com/m1xar/scope360-reconstruction/pkg/okx/connector/okx/executors"
+	"github.com/m1xar/scope360-reconstruction/pkg/okx/connector/okx/models"
+	"github.com/m1xar/scope360-reconstruction/pkg/okx/service/reconstructor/builders"
+	"github.com/m1xar/scope360-reconstruction/pkg/okx/service/reconstructor/helpers"
+	"github.com/m1xar/scope360-reconstruction/pkg/okx/service/reconstructor/workers"
+)
+
+const defaultCandleWorkers = 4
+
+func ReconstructClosedPositions(
+	client *resty.Client,
+	baseURL string,
+	days int,
+) ([]domain.Position, error) {
+	closedPositions, err := executors.FetchAllClosedPositions(client, baseURL)
+	if err != nil {
+		return nil, err
+	}
+	if len(closedPositions) == 0 {
+		return []domain.Position{}, nil
+	}
+
+	oldestMs := helpers.MustInt64(closedPositions[0].CTime)
+	for _, cp := range closedPositions[1:] {
+		if t := helpers.MustInt64(cp.CTime); t < oldestMs {
+			oldestMs = t
+		}
+	}
+
+	oldestMs -= 10 * 60 * 1000
+
+	allOrders, err := executors.FetchAllSwapAndFuturesOrders(client, baseURL, oldestMs)
+	if err != nil {
+		return nil, err
+	}
+	ordersByInst := helpers.GroupOrdersByInst(allOrders)
+
+	candleRequests := make(chan helpers.CandleRequest, defaultCandleWorkers)
+	workers.StartCandleWorkers(client, baseURL, candleRequests, defaultCandleWorkers)
+
+	type pendingCandle struct {
+		idx     int
+		replyCh chan helpers.CandleResponse
+	}
+
+	identifiers := map[string]models.Instrumentidentifier{}
+	for _, cp := range closedPositions {
+		_, ok := identifiers[cp.InstId]
+		if ok {
+			continue
+		}
+
+		identifiers[cp.InstId] = models.Instrumentidentifier{InstID: cp.InstId, InstType: cp.InstType}
+	}
+
+	instruments, err := executors.FetchInstruments(client, baseURL, identifiers)
+	if err != nil {
+		return nil, err
+	}
+
+	pending := make([]pendingCandle, 0, len(closedPositions))
+	positions := make([]domain.Position, len(closedPositions))
+
+	for i, cp := range closedPositions {
+		posOrders := helpers.MatchOrdersToPosition(cp, ordersByInst, instruments[cp.InstId])
+		pos, err := helpers.BuildPosition(cp, posOrders, instruments[cp.InstId])
+		if err != nil {
+			continue
+		}
+		positions[i] = pos
+
+		replyCh := make(chan helpers.CandleResponse, 1)
+		candleRequests <- helpers.CandleRequest{
+			InstId:  cp.InstId,
+			Bar:     "1m",
+			StartMs: helpers.MustInt64(cp.CTime),
+			EndMs:   helpers.MustInt64(cp.UTime),
+			ReplyCh: replyCh,
+		}
+		pending = append(pending, pendingCandle{idx: i, replyCh: replyCh})
+	}
+	close(candleRequests)
+
+	for _, p := range pending {
+		resp := <-p.replyCh
+		if resp.Err == nil {
+			high, low := helpers.GetHighLow(resp.Candles)
+			helpers.ApplyMAEMFE(&positions[p.idx], high, low)
+		}
+	}
+
+	filtered := make([]domain.Position, 0, len(positions))
+	for _, pos := range positions {
+		if pos.ID != uuid.Nil {
+			filtered = append(filtered, pos)
+		}
+	}
+	positions = filtered
+
+	sort.Slice(positions, func(i, j int) bool {
+		return positions[i].ClosedAt.Before(*positions[j].ClosedAt)
+	})
+
+	cutoff := helpers.CutoffFromDays(days)
+	if cutoff != nil {
+		trimmed := positions[:0]
+		for _, pos := range positions {
+			if pos.ClosedAt != nil && !pos.ClosedAt.Before(*cutoff) {
+				trimmed = append(trimmed, pos)
+			}
+		}
+		positions = trimmed
+	}
+
+	balance, err := executors.FetchBalance(client, baseURL)
+	if err == nil {
+		currentBal := helpers.MustFloat(balance.TotalEq)
+		bills, billsErr := executors.FetchAllSwapAndFuturesBills(client, baseURL, oldestMs, "")
+		if billsErr == nil && len(bills) > 0 {
+			snapshots := builders.BuildBalanceSnapshotsFromBills(currentBal, bills)
+			helpers.AttachBalanceInit(&positions, snapshots)
+		}
+	}
+
+	return positions, nil
+}
+
+func ReconstructOpenPositions(
+	client *resty.Client,
+	baseURL string,
+) ([]domain.OpenPosition, error) {
+	raw, err := executors.FetchOpenPositions(client, baseURL)
+	if err != nil {
+		return nil, err
+	}
+
+	identifiers := map[string]models.Instrumentidentifier{}
+	for _, cp := range raw {
+		_, ok := identifiers[cp.InstId]
+		if ok {
+			continue
+		}
+
+		identifiers[cp.InstId] = models.Instrumentidentifier{InstID: cp.InstId, InstType: cp.InstType}
+	}
+
+	instruments, err := executors.FetchInstruments(client, baseURL, identifiers)
+	if err != nil {
+		return nil, err
+	}
+
+	positions := make([]domain.OpenPosition, 0, len(raw))
+	for _, r := range raw {
+		positions = append(positions, builders.BuildOpenPosition(r, instruments[r.InstId]))
+	}
+
+	enrichOpenPositionOrders(client, baseURL, raw, positions)
+	return positions, nil
+}
+
+func enrichOpenPositionOrders(
+	client *resty.Client,
+	baseURL string,
+	raw []models.OpenPosition,
+	positions []domain.OpenPosition,
+) {
+	if len(raw) == 0 || len(positions) == 0 {
+		return
+	}
+
+	startMs := int64(0)
+	for _, r := range raw {
+		t := helpers.MustInt64(r.CTime)
+		if t == 0 {
+			continue
+		}
+		if startMs == 0 || t < startMs {
+			startMs = t
+		}
+	}
+	if startMs == 0 {
+		return
+	}
+
+	orders, err := executors.FetchAllSwapAndFuturesOrders(client, baseURL, startMs)
+	if err != nil {
+		return
+	}
+
+	for i := range positions {
+		if i >= len(raw) {
+			return
+		}
+		r := raw[i]
+		openMs := helpers.MustInt64(r.CTime)
+		posSide := strings.ToLower(strings.TrimSpace(r.PosSide))
+		matched := make([]models.Order, 0)
+
+		for _, ord := range orders {
+			if ord.InstId != r.InstId {
+				continue
+			}
+			ordPosSide := strings.ToLower(strings.TrimSpace(ord.PosSide))
+			if posSide != "" && posSide != "net" && ordPosSide != "" && ordPosSide != "net" && ordPosSide != posSide {
+				continue
+			}
+			if helpers.MustInt64(ord.UTime) < openMs {
+				continue
+			}
+			matched = append(matched, ord)
+		}
+
+		positions[i].Orders = helpers.BuildOrders(matched, positions[i].ID)
+	}
+}

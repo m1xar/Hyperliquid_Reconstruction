@@ -9,6 +9,7 @@ import (
 	"github.com/m1xar/scope360-reconstruction/pkg/hyperliquid/connector/hyperliquid/executors"
 	"github.com/m1xar/scope360-reconstruction/pkg/hyperliquid/connector/hyperliquid/models"
 	"github.com/m1xar/scope360-reconstruction/pkg/hyperliquid/service/reconstructor/helpers"
+	"github.com/m1xar/scope360-reconstruction/pkg/reconstruction/candlespan"
 )
 
 func StartCandleWorkers(
@@ -23,7 +24,7 @@ func StartCandleWorkers(
 		go func() {
 			defer wg.Done()
 			for req := range requests {
-				candles, err := fetchCandles(client, endpoint, req)
+				candles, err := fetchSpan(client, endpoint, req)
 				req.ReplyCh <- helpers.CandleResponse{Candles: candles, Err: err}
 			}
 		}()
@@ -33,35 +34,52 @@ func StartCandleWorkers(
 	}()
 }
 
-func fetchCandles(client *resty.Client, endpoint string, req helpers.CandleRequest) ([]models.HyperliquidCandle, error) {
-	intervalMs, _ := helpers.IntervalToMs(req.Interval)
+func fetchSpan(client *resty.Client, endpoint string, req helpers.CandleRequest) ([]models.HyperliquidCandle, error) {
+	var out []models.HyperliquidCandle
+	for _, segment := range candlespan.Split(req.StartMs, req.EndMs) {
+		candles, err := fetchCandles(client, endpoint, req.Coin, segment.Interval, segment.StartMs, segment.EndMs)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, candles...)
+	}
+	return out, nil
+}
+
+func fetchCandles(
+	client *resty.Client,
+	endpoint string,
+	coin, interval string,
+	startMs, endMs int64,
+) ([]models.HyperliquidCandle, error) {
+	intervalMs, _ := helpers.IntervalToMs(interval)
 	oldestAllowedMs := time.Now().UnixMilli() - intervalMs*5000
 
 	// Recent enough for Hyperliquid candle API — stay on HL.
-	if req.StartMs >= oldestAllowedMs {
+	if startMs >= oldestAllowedMs {
 		return executors.FetchAllCandlesHyperliquid(
 			client,
 			endpoint,
-			req.Coin,
-			req.Interval,
-			req.StartMs,
-			req.EndMs,
+			coin,
+			interval,
+			startMs,
+			endMs,
 		)
 	}
 
 	// Older than HL window: pull Binance for the old slice, HL for the recent slice.
 	var out []models.HyperliquidCandle
 
-	binanceEnd := req.EndMs
+	binanceEnd := endMs
 	if binanceEnd > oldestAllowedMs {
 		binanceEnd = oldestAllowedMs - 1
 	}
-	if binanceEnd >= req.StartMs {
+	if binanceEnd >= startMs {
 		binanceCandles, err := binance.FetchFuturesKlinesPaged(
 			client,
-			req.Coin,
-			req.Interval,
-			req.StartMs,
+			coin,
+			interval,
+			startMs,
 			binanceEnd,
 			499,
 		)
@@ -71,18 +89,18 @@ func fetchCandles(client *resty.Client, endpoint string, req helpers.CandleReque
 		out = append(out, binanceCandles...)
 	}
 
-	if req.EndMs >= oldestAllowedMs {
+	if endMs >= oldestAllowedMs {
 		hlStart := oldestAllowedMs
-		if hlStart < req.StartMs {
-			hlStart = req.StartMs
+		if hlStart < startMs {
+			hlStart = startMs
 		}
 		hlCandles, err := executors.FetchAllCandlesHyperliquid(
 			client,
 			endpoint,
-			req.Coin,
-			req.Interval,
+			coin,
+			interval,
 			hlStart,
-			req.EndMs,
+			endMs,
 		)
 		if err != nil {
 			return nil, err

@@ -77,3 +77,66 @@ func sortDealsByExecutionTime(deals []*pb.ProtoOADeal) {
 		return deals[i].GetExecutionTimestamp() < deals[j].GetExecutionTimestamp()
 	})
 }
+
+func DedupeDeals(deals []*pb.ProtoOADeal) []*pb.ProtoOADeal {
+	return dedupeDeals(deals)
+}
+
+func FetchDealsByPositionID(
+	ctx context.Context,
+	c *connector.Client,
+	positionID int64,
+	from, to time.Time,
+) ([]*pb.ProtoOADeal, error) {
+	session, err := c.EnsureSession(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return fetchDealsByPositionRange(ctx, c, session.CtidTraderAccountID, positionID, from, to)
+}
+
+func fetchDealsByPositionRange(
+	ctx context.Context,
+	c *connector.Client,
+	accountID, positionID int64,
+	from, to time.Time,
+) ([]*pb.ProtoOADeal, error) {
+	fromMs := from.UnixMilli()
+	if fromMs < 0 {
+		fromMs = 0
+	}
+	toMs := to.UnixMilli()
+
+	req := &pb.ProtoOADealListByPositionIdReq{
+		CtidTraderAccountId: &accountID,
+		PositionId:          &positionID,
+		FromTimestamp:       &fromMs,
+		ToTimestamp:         &toMs,
+	}
+	var res pb.ProtoOADealListByPositionIdRes
+	if err := c.Do(ctx, pb.ProtoOAPayloadType_PROTO_OA_DEAL_LIST_BY_POSITION_ID_REQ, req, &res); err != nil {
+		return nil, err
+	}
+
+	deals := res.GetDeal()
+	if !res.GetHasMore() || toMs <= fromMs {
+		sortDealsByExecutionTime(deals)
+		return deals, nil
+	}
+
+	midMs := fromMs + (toMs-fromMs)/2
+	if midMs <= fromMs || midMs >= toMs {
+		sortDealsByExecutionTime(deals)
+		return deals, nil
+	}
+
+	left, err := fetchDealsByPositionRange(ctx, c, accountID, positionID, time.UnixMilli(fromMs), time.UnixMilli(midMs))
+	if err != nil {
+		return nil, err
+	}
+	right, err := fetchDealsByPositionRange(ctx, c, accountID, positionID, time.UnixMilli(midMs+1), to)
+	if err != nil {
+		return nil, err
+	}
+	return dedupeDeals(append(left, right...)), nil
+}

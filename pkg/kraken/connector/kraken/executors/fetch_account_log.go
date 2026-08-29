@@ -16,12 +16,20 @@ const (
 )
 
 func FetchAllAccountLog(client *resty.Client, days int) ([]models.AccountLog, error) {
+	var since time.Time
+	if days > 0 {
+		since = time.Now().AddDate(0, 0, -days)
+	}
+	return FetchAllAccountLogSince(client, since)
+}
+
+func FetchAllAccountLogSince(client *resty.Client, since time.Time) ([]models.AccountLog, error) {
 	params := map[string]string{
 		"count": fmt.Sprint(accountLogPageSize),
 		"sort":  "asc",
 	}
-	if days > 0 {
-		params["since"] = time.Now().AddDate(0, 0, -days).UTC().Format(time.RFC3339)
+	if !since.IsZero() {
+		params["since"] = since.UTC().Format(time.RFC3339)
 	}
 
 	var result []models.AccountLog

@@ -5,6 +5,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/m1xar/scope360-reconstruction/pkg/domain"
 	"github.com/m1xar/scope360-reconstruction/pkg/mexc/connector/mexc/models"
 )
 
@@ -63,10 +64,6 @@ func OrderTypeFromMEXC(orderType int) string {
 	}
 }
 
-func IsOrderForLong(side int) bool {
-	return side == 1 || side == 2
-}
-
 func GetHighLow(candles []models.Candle) (high, low *float64) {
 	if len(candles) == 0 {
 		return nil, nil
@@ -85,4 +82,56 @@ func GetHighLow(candles []models.Candle) (high, low *float64) {
 	}
 
 	return &h, &l
+}
+
+func BalanceWindowStart(positions []domain.Position, cutoff *time.Time) *time.Time {
+	if cutoff == nil {
+		return nil
+	}
+
+	start := *cutoff
+	for _, pos := range positions {
+		if pos.CreatedAt.Before(start) {
+			start = pos.CreatedAt
+		}
+	}
+	return &start
+}
+
+func IsStableCurrency(currency string) bool {
+	switch strings.ToUpper(strings.TrimSpace(currency)) {
+	case "USDT", "USDC":
+		return true
+	default:
+		return false
+	}
+}
+
+func ApplyMAEMFE(pos *domain.Position, high, low *float64) {
+	if high == nil || low == nil {
+		return
+	}
+	entry := pos.EntryPrice
+	exit := pos.ExitPrice
+
+	amount := pos.Amount
+	priceDelta := exit - entry
+	if pos.Side == "SHORT" {
+		priceDelta = entry - exit
+	}
+	if priceDelta != 0 {
+		amount = math.Abs(pos.Pnl / priceDelta)
+	}
+
+	if pos.Side == "LONG" {
+		maeVal := Round8((*low - entry) * amount)
+		mfeVal := Round8((*high - entry) * amount)
+		pos.MAE = &maeVal
+		pos.MFE = &mfeVal
+	} else {
+		maeVal := Round8((entry - *high) * amount)
+		mfeVal := Round8((entry - *low) * amount)
+		pos.MAE = &maeVal
+		pos.MFE = &mfeVal
+	}
 }

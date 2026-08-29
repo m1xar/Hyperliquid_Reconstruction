@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/m1xar/scope360-reconstruction/pkg/domain"
 	"github.com/m1xar/scope360-reconstruction/pkg/kraken/connector/kraken/models"
 )
 
@@ -111,4 +112,25 @@ func GetHighLow(candles []models.Candle) (high, low *float64) {
 		}
 	}
 	return &h, &l
+}
+
+func ApplyMAEMFE(pos *domain.Position, high, low *float64) {
+	if high == nil || low == nil {
+		return
+	}
+	entry := pos.EntryPrice
+	amount := pos.Amount
+
+	if pos.Side == "LONG" {
+		maeVal := Round8((*low - entry) * amount)
+		mfeVal := Round8((*high - entry) * amount)
+		pos.MAE = &maeVal
+		pos.MFE = &mfeVal
+		return
+	}
+
+	maeVal := Round8((entry - *high) * amount)
+	mfeVal := Round8((entry - *low) * amount)
+	pos.MAE = &maeVal
+	pos.MFE = &mfeVal
 }
